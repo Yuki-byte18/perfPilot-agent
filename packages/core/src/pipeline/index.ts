@@ -652,6 +652,16 @@ export class Pipeline {
         scoped.error('执行阶段失败', { code: error.code, error: error.message });
       }
     } else {
+      /**
+       * 跳过原因**按真实条件逐条判**，不是"从上面那个 if 掉下来"。
+       *
+       * 早先这里写死"没有 apply / confirm 裁决的候选"。而只读运行
+       * （`diagnose`：CLI 传的 `implementedStages` 里没有 execute）也会走到
+       * 这个分支 —— 于是同一份报告里出现自相矛盾的两行：
+       * 上面写着 `apply 1 / confirm 1`，下面写着"没有 apply / confirm 裁决的候选"。
+       *
+       * 假的原因比没原因更糟：它会把读报告的人送去查一个不存在的问题。
+       */
       stages.push({
         name: 'execute',
         status: 'skipped',
@@ -659,9 +669,11 @@ export class Pipeline {
         note:
           this.deps.executor == null
             ? '未注入执行编排'
-            : decisions.length === 0
-              ? '没有候选可执行'
-              : '没有 apply / confirm 裁决的候选',
+            : !implemented.has('execute')
+              ? '只读运行（diagnose）：本次不执行任何改动'
+              : decisions.length === 0
+                ? '没有候选可执行'
+                : '没有 apply / confirm 裁决的候选',
       });
     }
 

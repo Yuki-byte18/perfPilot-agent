@@ -65,7 +65,7 @@ const expectedGainShape = Object.fromEntries(
   MetricNameSchema.options.map((name) => [name, z.number().finite()]),
 );
 
-export const CandidateSchema = z
+const CandidateObjectSchema = z
   .object({
     id: z.string().min(1),
     runId: z.string().min(1),
@@ -85,7 +85,9 @@ export const CandidateSchema = z
     recalledFrom: z.array(z.string().min(1)),
     bottleneckKinds: z.array(BottleneckKindSchema),
   })
-  .strict()
+  .strict();
+
+export const CandidateSchema = CandidateObjectSchema
   /**
    * 跨字段约束：
    * 1. origin=rule 时 ruleId 必填；origin=llm 时 promptVersion 必填
@@ -99,6 +101,42 @@ export const CandidateSchema = z
     message: '不可逆的候选只能是 C 类（仅建议）',
     path: ['reversible'],
   });
+
+/**
+ * LLM 输出的候选**草稿**：只要求模型给得出、且**该由它决定**的那部分。
+ *
+ * 与 `CandidateSchema` 的差别就是下面 `omit` 掉的那些字段，但这一点很关键：
+ * `id` / `runId` / `promptVersion` / `origin` 是我们自己盖的章，`recalledFrom`
+ * 来自记忆层，`bottleneckKinds` 能从 `bottleneckIds` 反查 —— 让模型去猜这些，
+ * 结果是**每一条候选都被 schema 拒掉**：花了钱、零产出，而报错信息里
+ * 只会说"runId: Required"，看不出是我们问错了。
+ *
+ * 反过来，凡是只有模型才知道的（改什么、为什么、多大把握、可不可逆），
+ * 一个字段都不放宽 —— 补齐之后仍然要过一遍完整的 `CandidateSchema`，
+ * 那时跨字段约束（例如"不可逆只能是 C 类"）才生效。
+ */
+const LlmCandidateShape = CandidateObjectSchema.omit({
+  id: true,
+  runId: true,
+  origin: true,
+  ruleId: true,
+  promptVersion: true,
+  recalledFrom: true,
+  bottleneckKinds: true,
+}).shape;
+
+/**
+ * 未知字段**丢弃而不报错**。
+ *
+ * 候选本身是 strict 的（多一个字段就说明有 bug），但 LLM 的输出不能用这个标准：
+ * 它经常把 prompt 里的字段原样回抄（`id`、`runId`…），或者多写一句 `notes`。
+ * 为这种无害的多余字段丢掉一整条**已经付过钱**的候选，是纯粹的浪费。
+ * 因此这里用 zod 的默认行为（strip）：多余的键被丢掉，其余照常解析。
+ * 补齐之后仍要过一遍完整的 `CandidateSchema` —— **那一遍是 strict 的**。
+ */
+export const LlmCandidateSchema = z.object(LlmCandidateShape);
+
+export type LlmCandidateDraft = z.infer<typeof LlmCandidateSchema>;
 
 export const PLANNED_CHANGE_TYPES_SCHEMA = z.enum(PLANNED_CHANGE_TYPES);
 

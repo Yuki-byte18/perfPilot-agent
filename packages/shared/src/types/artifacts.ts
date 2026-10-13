@@ -106,6 +106,18 @@ export interface TracePayload {
 export interface BundleFile {
   path: string;
   size: number;
+  /**
+   * 对应的**源文件**路径（相对项目根）；认不出来就是 null。
+   *
+   * 写成可选（而不是像 schema 那样 `.default(null)` 的必填）是**刻意的**：
+   * 这份手写接口是给读取方用的，而产物可能是更早版本写下的（那时还没有这个字段）。
+   * 消费侧统一用 `sourcePath ?? path`，两种情形都对。
+   *
+   * 注意：`schema/artifacts.ts` 里的 `BundleFileSchema` 是**权威** ——
+   * 手写这份只是因为 `exactOptionalPropertyTypes` 下 `z.infer` 与手写接口
+   * 不互相赋值（见 `types/bottleneck.ts` 顶部）。
+   */
+  sourcePath?: string | null;
 }
 
 export interface BundleModule {

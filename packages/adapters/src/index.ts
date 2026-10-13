@@ -28,5 +28,6 @@ export * from './executor/index.js';
 export * from './git/index.js';
 export * from './asset/index.js';
 export * from './check-runner/index.js';
+export * from './check-runner/preview.js';
 export * from './memory/index.js';
 export * from './scm/index.js';

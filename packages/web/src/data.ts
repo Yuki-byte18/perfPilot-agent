@@ -282,6 +282,16 @@ export interface TimelineEntry {
   description: string;
   /** 优化分级 A / B / C */
   class: Candidate['class'];
+  /**
+   * 这条候选是谁提的。
+   *
+   * 必须显示出来：规则候选与 LLM 候选的**可信度不是一回事** ——
+   * 规则是确定性的、每次跑都一样；LLM 的结论依赖模型与采样。
+   * 混在一起展示，等于让人用同一份信任去读两种东西。
+   */
+  origin: Candidate['origin'];
+  /** LLM 候选才有：生成它的 prompt 版本（用于解释"为什么这次方案变了"） */
+  promptVersion: string | null;
   route: Decision['route'] | null;
   verdict: Decision['verdict'] | null;
   score: number | null;
@@ -334,6 +344,8 @@ export function buildTimeline(detail: RunDetail): TimelineEntry[] {
       title: candidate.title,
       description: candidate.description,
       class: candidate.class,
+      origin: candidate.origin,
+      promptVersion: candidate.promptVersion,
       route: decision?.route ?? null,
       verdict: decision?.verdict ?? null,
       score: decision?.score ?? null,
@@ -825,4 +837,288 @@ export function describeRun(summary: RunSummary): string {
     minute: '2-digit',
   });
   return `${time} · ${RUN_STATUS_LABEL[summary.status]} · ${summary.metricCount} 项指标`;
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 诊断 agent（LLM）这一次到底做了什么
+// ─────────────────────────────────────────────────────────────────────
+
+export const VERDICT_LABEL: Record<Decision['verdict'], string> = {
+  apply: '自动执行',
+  confirm: '待人工确认',
+  suggest: '仅建议',
+  reject: '不值得做',
+};
+
+const VERDICT_ORDER: Decision['verdict'][] = ['apply', 'confirm', 'suggest', 'reject'];
+
+export interface AgentFindingView {
+  id: string;
+  title: string;
+  kind: string;
+  /** 是复核（改写规则结论的归因）还是新发现 */
+  refined: boolean;
+  /** 复核的是哪条规则结论（就是被改写的那条瓶颈的 id） */
+  refinesId: string | null;
+  evidenceCount: number;
+  severity: number;
+  confidence: number;
+}
+
+export interface AgentView {
+  /** 这次 LLM 有没有真的参与（有产物，或者花了钱） */
+  ran: boolean;
+  findings: AgentFindingView[];
+  newCount: number;
+  refinedCount: number;
+  bottleneckTotal: number;
+  candidateTotal: number;
+  candidateFromLlm: number;
+  /** LLM 提出的候选最终被裁决成什么 */
+  verdicts: Array<{ verdict: Decision['verdict']; count: number }>;
+  costUsd: number;
+  /** 用到的 prompt 版本（诊断与方案各自独立演进） */
+  promptVersions: string[];
+}
+
+/**
+ * 把"诊断 agent 这次干了什么"从 run 数据里算出来。
+ *
+ * ## 一个不显眼但要紧的推导
+ *
+ * **哪些瓶颈是 LLM 复核出来的**没有直接字段：`refines` 只活在 `LlmFinding` 里，
+ * 合并进瓶颈列表时就变成了"改写那条规则结论的归因"。但有一件事是确定的：
+ * LLM **新提出**的瓶颈 id 一律是 `bn_llm_*`（在 `core/diagnoser/agent.ts` 里生成），
+ * 所以"`source` 是 llm、id 却不是 `bn_llm_` 前缀"只可能是**复核**了某条规则结论。
+ *
+ * 这个约定两边必须一起改，因此这里把它显式写出来 —— 不是让它藏在代码里。
+ */
+export function buildAgentView(detail: RunDetail): AgentView {
+  const bottlenecks = detail.diagnosis?.bottlenecks ?? [];
+  const fromLlm = bottlenecks.filter((b) => b.source === 'llm');
+
+  const findings: AgentFindingView[] = fromLlm.map((b) => {
+    const refined = !b.id.startsWith('bn_llm_');
+    return {
+      id: b.id,
+      title: b.title,
+      kind: b.kind,
+      refined,
+      refinesId: refined ? b.id : null,
+      evidenceCount: b.evidence.length,
+      severity: b.severity,
+      confidence: b.confidence,
+    };
+  });
+
+  const verdictOf = new Map(detail.decisions.map((d) => [d.candidateId, d.verdict]));
+  const llmCandidates = detail.candidates.filter((c) => c.origin === 'llm');
+
+  const counts = new Map<Decision['verdict'], number>();
+  for (const candidate of llmCandidates) {
+    const verdict = verdictOf.get(candidate.id);
+    if (verdict === undefined) continue;
+    counts.set(verdict, (counts.get(verdict) ?? 0) + 1);
+  }
+
+  return {
+    ran: fromLlm.length > 0 || llmCandidates.length > 0 || detail.run.llmCostUsd > 0,
+    findings,
+    newCount: findings.filter((f) => !f.refined).length,
+    refinedCount: findings.filter((f) => f.refined).length,
+    bottleneckTotal: bottlenecks.length,
+    candidateTotal: detail.candidates.length,
+    candidateFromLlm: llmCandidates.length,
+    verdicts: VERDICT_ORDER.filter((v) => counts.has(v)).map((v) => ({
+      verdict: v,
+      count: counts.get(v) ?? 0,
+    })),
+    costUsd: detail.run.llmCostUsd,
+    promptVersions: [
+      ...new Set(
+        llmCandidates.map((c) => c.promptVersion).filter((v): v is string => v !== null),
+      ),
+    ],
+  };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// 「这次运行到底做了什么」——读懂报告的第一件事
+// ─────────────────────────────────────────────────────────────────────
+
+export type RunMode = 'readonly' | 'dry-run' | 'blocked' | 'partial' | 'closed-loop';
+
+export interface RunModeView {
+  mode: RunMode;
+  /** 大字标题：只读诊断 / 演练 / 完整闭环 … */
+  label: string;
+  /** 白话解释：这次做了什么、因此哪些数字是 0 且**属于正常** */
+  explain: string;
+  /** 这次运行本身有没有可能改变代码 */
+  changesExpected: boolean;
+}
+
+/**
+ * 判断这次运行属于哪种模式。
+ *
+ * ## 为什么这一条必须放在最前面
+ *
+ * 报告里最容易误读的东西是**一串 0**：跑 `diagnose` 或 `run --dry-run` 之后，
+ * "已采纳的改动 0 / 打回的改动 0 / 等你点头的 0" 看起来像"工具什么都没干" ——
+ * 而真相是"这次本来就不改代码"。用户看不懂报告，一半是因为这个：
+ * **不知道自己在看哪一类运行。**
+ *
+ * 判据全部来自流水线阶段自己的备注（那是流水线写的，不是报告页猜的）。
+ */
+export function describeRunMode(detail: RunDetail): RunModeView {
+  const stageOf = (name: StageRecord['name']): StageRecord | null =>
+    detail.run.stages.find((stage) => stage.name === name) ?? null;
+
+  const execute = stageOf('execute');
+  const verify = stageOf('verify');
+  const executeNote = execute?.note ?? '';
+  const verifyNote = verify?.note ?? '';
+
+  if (executeNote.includes('只读运行')) {
+    return {
+      mode: 'readonly',
+      label: '只读诊断',
+      explain:
+        '这次只测量和诊断，**没有动你的代码** —— 所以"改动"这一组数字都是 0，那是正常的，不是失败。',
+      changesExpected: false,
+    };
+  }
+
+  if (verifyNote.includes('dry-run')) {
+    return {
+      mode: 'dry-run',
+      label: '演练（dry-run）',
+      explain:
+        '补丁已经生成好了，但**一个字节都没写进你的工作区** —— 所以"改动"那一组是 0，属于预期行为。',
+      changesExpected: false,
+    };
+  }
+
+  if (executeNote.includes('未写入工作区')) {
+    return {
+      mode: 'blocked',
+      label: '没能落盘',
+      explain: `执行阶段产出了补丁，但没有写进工作区：${executeNote}`,
+      changesExpected: false,
+    };
+  }
+
+  if (verify !== null && verify.status === 'skipped') {
+    return {
+      mode: 'partial',
+      label: '没跑到验证',
+      explain:
+        '验证阶段没有执行 —— 没有它就没有"改动到底有没有用"的结论，下面的收益数字都不能当结论看。',
+      changesExpected: false,
+    };
+  }
+
+  return {
+    mode: 'closed-loop',
+    label: '完整闭环',
+    explain:
+      '这次真的应用了改动、重新采集了指标，并按验证结论决定"保留"还是"回滚" —— 下面每个改动都有明确的结局。',
+    changesExpected: true,
+  };
+}
+
+export interface NextStep {
+  tone: Tone;
+  text: string;
+}
+
+/**
+ * 「接下来该做什么」。
+ *
+ * 报告页最容易犯的错是**把一堆数字丢给用户自己判断**。这一块把"看到这些数字之后
+ * 该敲什么命令 / 该注意什么"直接写出来 —— 尤其是那些**看起来像问题、其实是预期**
+ * 的情况（没有基线、只读运行、来源不可用）。
+ */
+export function buildNextSteps(detail: RunDetail, mode: RunModeView): NextStep[] {
+  const steps: NextStep[] = [];
+  const overview = buildOverview(detail);
+  const collection = buildCollection(detail);
+
+  if (overview.metricCount === 0) {
+    steps.push({
+      tone: 'bad',
+      text: '这次一条指标都没测到。先跑 `perfpilot doctor`：它会告诉你地址能不能打开、Lighthouse 装没装。',
+    });
+  }
+
+  if (collection.failedSources > 0) {
+    steps.push({
+      tone: 'warn',
+      text:
+        `有 ${collection.failedSources} 个数据来源**运行中失败**（多半是页面打不开）—— ` +
+        'LCP / CLS / TBT 这类指标会整块缺失。加 `--preview` 让工具自己起预览服务，是最常见的一步修复。',
+    });
+  }
+
+  if (collection.unavailableSources > 0) {
+    steps.push({
+      tone: 'neutral',
+      text:
+        `另有 ${collection.unavailableSources} 个来源未接入（HAR / trace / 页面侧 web-vitals）—— ` +
+        '它们需要你额外提供产物，**没接入是正常的**，只是少一部分证据。',
+    });
+  }
+
+  if (mode.mode === 'readonly') {
+    steps.push({
+      tone: 'neutral',
+      text: '想让它真的动手改代码：`perfpilot run --preview --url <你的地址>`（改动会先应用、再验证、不行就自动回滚）。',
+    });
+  }
+
+  if (mode.mode === 'dry-run') {
+    steps.push({
+      tone: 'neutral',
+      text: '补丁在"优化"页里可以直接看。确认没问题就把 `--dry-run` 去掉，让它真的应用并验证。',
+    });
+  }
+
+  if (mode.mode === 'blocked') {
+    steps.push({
+      tone: 'warn',
+      text: '工作区不干净时工具不会动代码（回滚会连你未提交的改动一起抹掉）。先 `git add -A && git commit`，或用 `git stash`。',
+    });
+  }
+
+  if (overview.needsConfirmation > 0) {
+    steps.push({
+      tone: 'warn',
+      text: `有 ${overview.needsConfirmation} 个改动**等你确认**：补丁已经生成，但这类改动需要人看一眼（例如换了图片格式就得同步改引用）。` +
+        '用 `perfpilot fix --only B` 落地，或在"优化"页逐个看。',
+    });
+  }
+
+  if (overview.rolledBackCount > 0) {
+    steps.push({
+      tone: 'warn',
+      text: `${overview.rolledBackCount} 个改动没通过验证、已自动回滚 —— 这是设计好的行为，具体原因写在"优化"页的对应条目里。`,
+    });
+  }
+
+  if (overview.keptCount > 0) {
+    steps.push({
+      tone: 'good',
+      text: `${overview.keptCount} 个改动通过了验证并留在仓库里 —— 它们都已经提交，` +
+        '下次运行会拿"改动前"的数据当对照。',
+    });
+  }
+
+  if (detail.run.baseline === null) {
+    steps.push({
+      tone: 'neutral',
+      text: '这是**第一次**有可比数据的运行：还没有基线，所以"变好还是变差"要等下一次才有答案。',
+    });
+  }
+
+  return steps;
 }

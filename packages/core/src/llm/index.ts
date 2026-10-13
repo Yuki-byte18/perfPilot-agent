@@ -1,15 +1,24 @@
 import {
+  BOTTLENECK_KINDS,
   CandidateSchema,
+  EFFORTS,
+  EVIDENCE_KINDS,
+  LlmCandidateSchema,
   LlmFindingSchema,
+  METRIC_NAMES,
+  OPTIMIZATION_CLASSES,
+  RISK_LEVELS,
   createNullLlm,
   parseExternal,
   toPerfPilotError,
   type Candidate,
+  type LlmCandidateDraft,
   type LlmConfig,
   type LlmCost,
   type LlmDiagnoseInput,
   type LlmDiagnoseOutput,
   type LlmFinding,
+  type LlmFindingDraft,
   type LlmPlanInput,
   type LlmPlanOutput,
   type LlmPort,
@@ -331,18 +340,22 @@ async function loadAiSdk(config: LlmConfig): Promise<{
    * 会固定打 api.openai.com，`base_url` 配了也不生效 —— 那正是"配了没用"的经典坑。
    */
   const factory = provider[factoryExport];
-  const client =
-    typeof factory === 'function'
-      ? (factory as (options: Record<string, unknown>) => Record<string, unknown>)({
-          ...(config.base_url === null ? {} : { baseURL: config.base_url }),
-          ...(apiKey === undefined ? {} : { apiKey }),
-        })
-      : provider;
+  const builtWithFactory = typeof factory === 'function';
+  const client = builtWithFactory
+    ? (factory as (options: Record<string, unknown>) => unknown)({
+        ...(config.base_url === null ? {} : { baseURL: config.base_url }),
+        ...(apiKey === undefined ? {} : { apiKey }),
+      })
+    : provider;
 
-  const model = client[providerExport] ?? provider[providerExport];
+  const model = pickModelFactory(client) ?? (builtWithFactory ? null : provider[providerExport]);
+
   if (typeof model !== 'function') {
     throw new Error(
-      `\`${providerPackage}\` 未安装或版本不兼容，请运行 \`npm add ${providerPackage}\``,
+      builtWithFactory
+        ? `\`${providerPackage}\` 的 ${factoryExport} 建出来的 client 上没有模型工厂` +
+            '（可用的形态是 client 本身 / .chat / .languageModel）—— 这是版本不兼容，请检查 SDK 版本'
+        : `\`${providerPackage}\` 未安装或版本不兼容，请运行 \`npm add ${providerPackage}\``,
     );
   }
 
@@ -350,6 +363,39 @@ async function loadAiSdk(config: LlmConfig): Promise<{
     generateText: ai.generateText,
     model: model as (name: string) => unknown,
   };
+}
+
+/**
+ * 从 provider client 上挑出"用模型名建模型"的那个函数。
+ *
+ * ## 这里踩过一个会**静默花错钱**的坑
+ *
+ * 早先这一行写的是 `client[providerExport]`（即 `client.openai`）。而
+ * `@ai-sdk/openai` 建出来的 client **没有** `.openai` 这个属性 —— 它本身可调用
+ * （`client('deepseek-chat')`），另有 `.chat` / `.languageModel`。
+ * 于是那一行永远是 `undefined`，`??` 于是回退到**默认 provider**：
+ * 它只认 `OPENAI_API_KEY`，并且**完全丢掉 base_url**。
+ *
+ * 后果分两种，都很糟：
+ *
+ * - 配了 DeepSeek、环境里没有 `OPENAI_API_KEY` → 报 "OpenAI API key is missing"，
+ *   把一个用户根本没配过的东西说成原因；
+ * - 环境里**恰好**有 `OPENAI_API_KEY` → 请求真的发去 api.openai.com。
+ *   用户以为在用 DeepSeek，账单来自 OpenAI。
+ *
+ * 所以这里显式列出真实存在的三种形态，并且**不再用 `??` 静默兜底**：
+ * 工厂建出来的 client 上找不到模型工厂，就当版本不兼容直接报错。
+ */
+export function pickModelFactory(client: unknown): ((name: string) => unknown) | null {
+  if (typeof client === 'function') return client as (name: string) => unknown;
+  if (client === null || typeof client !== 'object') return null;
+
+  const candidate = client as { chat?: unknown; languageModel?: unknown };
+  if (typeof candidate.chat === 'function') return candidate.chat as (name: string) => unknown;
+  if (typeof candidate.languageModel === 'function') {
+    return candidate.languageModel as (name: string) => unknown;
+  }
+  return null;
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -368,11 +414,26 @@ function extractJson(text: string): string | null {
   return null;
 }
 
-/** 把 LLM 输出解析成 `unknown[]`：剥 markdown、解析 JSON、单对象包成数组 */
+/** 告警里附原始输出时的截断长度：够看清形状，又不至于淹掉日志 */
+const RAW_LOG_LIMIT = 800;
+
+function clip(text: string): string {
+  return text.length <= RAW_LOG_LIMIT
+    ? text
+    : `${text.slice(0, RAW_LOG_LIMIT)}…（共 ${text.length} 字）`;
+}
+
+/**
+ * 把 LLM 输出解析成 `unknown[]`：剥 markdown、解析 JSON、单对象包成数组。
+ *
+ * 失败时**一定附上原始输出的开头**。这条是拿真钱换来的：第一次真调 LLM 时，
+ * 校验失败的告警里只有 zod 的字段名，看不到模型到底说了什么，
+ * 于是"为什么它给的形状不对"只能靠猜 —— 每轮调 prompt 都成了盲调。
+ */
 function parseJsonArray(text: string, logger: LoggerPort, what: string): unknown[] | null {
   const jsonText = extractJson(text);
   if (jsonText === null) {
-    logger.warn(`${what} 输出不是有效 JSON，已丢弃`);
+    logger.warn(`${what} 输出不是有效 JSON，已丢弃`, { raw: clip(text) });
     return null;
   }
 
@@ -380,36 +441,92 @@ function parseJsonArray(text: string, logger: LoggerPort, what: string): unknown
     const raw: unknown = JSON.parse(jsonText);
     return Array.isArray(raw) ? raw : [raw];
   } catch {
-    logger.warn(`${what} 输出 JSON 解析失败，已丢弃`);
+    logger.warn(`${what} 输出 JSON 解析失败，已丢弃`, { raw: clip(jsonText) });
     return null;
   }
 }
 
-/** 解析 LLM 输出的候选方案。失败的候选逐个丢弃，不影响其它。 */
+/**
+ * 解析 LLM 输出的候选方案。逐条处理，坏的那条不影响其它。
+ *
+ * **两道闸**：
+ *
+ * 1. `LlmCandidateSchema` —— 只问模型"只有它才知道"的东西
+ *    （改什么、多大把握、可不可逆）；
+ * 2. 我们自己盖章 —— `id` / `runId` / `origin` / `promptVersion` / `recalledFrom`，
+ *    以及从 `bottleneckIds` 反查出来的 `bottleneckKinds`；补齐之后再过一遍
+ *    **完整**的 `CandidateSchema`，跨字段约束（"不可逆只能是 C 类"）才真正生效。
+ *
+ * 早先只有第 2 步、没有第 1 步 —— 于是每一条候选都因为
+ * "runId: Required / promptVersion: Required" 被拒，花了钱零产出，
+ * 而报错看着还像是模型不听话。
+ */
 function parseCandidates(text: string, input: LlmPlanInput, logger: LoggerPort): Candidate[] {
   const arr = parseJsonArray(text, logger, 'LLM 方案');
   if (arr === null) return [];
 
+  const kindById = new Map(input.bottlenecks.map((b) => [b.id, b.kind]));
   const candidates: Candidate[] = [];
-  for (const item of arr) {
+
+  for (const [index, item] of arr.entries()) {
     try {
-      const parsed = parseExternal(CandidateSchema, item, { what: 'LLM 候选方案' });
-      // 补全 runId 和 promptVersion（LLM 不该自己编这些）
-      candidates.push({
-        ...parsed,
+      const draft = parseExternal(LlmCandidateSchema, item, { what: 'LLM 候选方案' });
+
+      const kinds = [
+        ...new Set(
+          draft.bottleneckIds.map((id) => kindById.get(id)).filter((kind) => kind !== undefined),
+        ),
+      ];
+
+      /**
+       * 回链的瓶颈一个都对不上 → 丢弃并说清原因。
+       *
+       * 候选必须能指回它要解决的问题（报告要按瓶颈分组，决策层要靠它算收益），
+       * 而"编一个看起来像的 id"是模型的常见行为。与其留一条看着有方案、
+       * 其实不指向任何问题的候选，不如丢掉。
+       */
+      if (kinds.length === 0) {
+        logger.warn('LLM 候选回链的瓶颈都不存在，已丢弃该条', {
+          bottleneckIds: draft.bottleneckIds,
+          raw: clip(JSON.stringify(item)),
+        });
+        continue;
+      }
+
+      const filled: Candidate = {
+        ...draft,
+        id: `cand_llm_${input.runId}_${index}`,
         runId: input.runId,
-        promptVersion: PROMPT_VERSION,
         origin: 'llm',
         ruleId: null,
-      });
+        promptVersion: PROMPT_VERSION,
+        recalledFrom: [],
+        bottleneckKinds: kinds,
+      };
+
+      candidates.push(parseExternal(CandidateSchema, filled, { what: 'LLM 候选方案' }));
     } catch (err) {
       const error = toPerfPilotError(err);
-      logger.warn('LLM 候选校验失败，已丢弃该条', { error: error.message });
+      logger.warn('LLM 候选校验失败，已丢弃该条', {
+        error: error.message,
+        raw: clip(JSON.stringify(item)),
+      });
     }
   }
 
   return candidates;
 }
+
+/**
+ * 校验诊断结论时用的 schema：`impact` 允许缺失（默认空对象）。
+ *
+ * `impact`（这个瓶颈影响了哪些指标）是**补充信息**，用于报告展示；
+ * 证据、归因、种类才是必须的。模型偶尔漏掉它，不该让整条结论作废 ——
+ * 那等于为一个小疏漏丢掉一次已经付过钱的调用。
+ */
+const LlmFindingInputSchema = LlmFindingSchema.extend({
+  impact: LlmFindingSchema.shape.impact.default({}),
+});
 
 /**
  * 解析诊断 agent 的输出。
@@ -427,7 +544,7 @@ function parseFindings(text: string, input: LlmDiagnoseInput, logger: LoggerPort
   const findings: LlmFinding[] = [];
   for (const [index, item] of arr.entries()) {
     try {
-      const parsed = parseExternal(LlmFindingSchema, item, { what: 'LLM 诊断结论' });
+      const parsed = parseExternal(LlmFindingInputSchema, item, { what: 'LLM 诊断结论' });
 
       findings.push({
         bottleneck: {
@@ -448,7 +565,10 @@ function parseFindings(text: string, input: LlmDiagnoseInput, logger: LoggerPort
       });
     } catch (err) {
       const error = toPerfPilotError(err);
-      logger.warn('LLM 诊断结论校验失败，已丢弃该条', { error: error.message });
+      logger.warn('LLM 诊断结论校验失败，已丢弃该条', {
+        error: error.message,
+        raw: clip(JSON.stringify(item)),
+      });
     }
   }
 
@@ -489,20 +609,97 @@ function computeCost(usage: unknown, provider: string): LlmCost {
 // Prompt 构造
 // ─────────────────────────────────────────────────────────────────────
 
+/**
+ * 把枚举数组渲染成 prompt 里的一行。
+ *
+ * **从常量生成，不手抄**：上一次真调 LLM，模型编出了 `kind: "IMAGE_SIZE"`
+ * （一个指标名），因为 prompt 只说"必须是给定枚举值之一"却**从没给出枚举**。
+ * 手抄还有第二个坑：schema 加了新种类，prompt 不会跟着变，而且没人会发现。
+ */
+const listOf = (values: readonly string[]): string => values.join(' | ');
+
+/**
+ * Prompt 里的示例 —— **不是装饰**。
+ *
+ * 模型的输出形状几乎完全跟着示例走。第一次真调 LLM 时，输入里把规则证据
+ * 渲染成了字符串数组，模型就照着输出字符串数组，而 schema 要的是对象：
+ * 5 条结论全被丢掉，花了钱零产出。
+ *
+ * 类型标注让"示例本身不合法"在编译期暴露；`llm-prompt.test.ts` 再用
+ * **真正的 schema** 校验一次（跨字段 refine 只在运行时生效）。
+ */
+const DIAGNOSE_EXAMPLE: LlmFindingDraft = {
+  kind: 'LONG_MAIN_THREAD_TASK',
+  title: '首屏存在 240ms 长任务，与第三方统计脚本的加载时间重合',
+  severity: 70,
+  impact: { TBT: 240, INP: 180 },
+  attribution: {
+    level: 'source',
+    file: 'src/main.ts',
+    line: 42,
+    column: null,
+    component: null,
+  },
+  evidence: [
+    {
+      kind: 'trace-event',
+      description: 'trace 中 1.8s 处有一个 240ms 长任务，topFrame 指向 src/main.ts:42',
+      payload: { durationMs: 240, startTime: 1800 },
+    },
+  ],
+  confidence: 0.6,
+  refines: 'bn_rule_1',
+};
+
+const PLAN_EXAMPLE: LlmCandidateDraft = {
+  bottleneckIds: ['bn_rule_1'],
+  class: 'B',
+  title: '把非首屏路由改成按需加载',
+  description:
+    '首屏只需要首页组件。把路由表里的静态 import 改成 () => import(...)，其余路由的代码延后到访问时再下载。',
+  changes: [
+    {
+      type: 'ast',
+      file: 'src/router/index.ts',
+      node: 'lazy-route-component',
+      description: '把 component: Home 改成 () => import("../views/Home.vue")',
+    },
+  ],
+  expectedGain: { LCP: 300, FCP: 150 },
+  confidence: 0.6,
+  risk: 'medium',
+  effort: 'low',
+  reversible: true,
+};
+
 function buildPlanSystemPrompt(): string {
   return [
     '你是前端性能优化专家。根据诊断结果，为每个瓶颈生成可执行的优化方案。',
     '',
-    '严格遵守以下规则：',
-    '1. 只输出 JSON 数组，不要任何解释文字或 markdown 代码块。',
-    '2. 每个候选必须回链到至少一个瓶颈（bottleneckIds 非空）。',
-    '3. expectedGain 只列出该候选能影响的指标，单位与 Metric 一致（ms/byte/count）。',
-    '4. class 只能是 A/B/C：A=全自动（不改运行时语义），B=半自动（改渲染/加载时序），C=仅建议。',
-    '5. reversible=false 的候选只能是 C 类。',
-    '6. confidence 不要超过 0.75（LLM 生成的方案天然有不确定性）。',
-    '7. changes 数组至少一项，每项必须有 type 字段。',
-    '8. expectedGain 只能写这个改法**真能改变**的指标：拆分 chunk 不会减少总字节数，',
-    '   压缩图片不会改善 LCP 的服务器部分。宁可少写，也不要写一个做不到的数字。',
+    '## 输出格式（严格遵守）',
+    '',
+    '只输出 JSON 数组，不要解释文字、不要 markdown 代码块。每个元素形如：',
+    '',
+    JSON.stringify(PLAN_EXAMPLE, null, 2),
+    '',
+    '**不要**输出 id / runId / origin / ruleId / promptVersion / recalledFrom / bottleneckKinds：',
+    '这些由我们自己填（你写了也会被忽略）。你只需要回答"改什么、为什么、多大把握、可不可逆"。',
+    '',
+    '## 字段约束',
+    '',
+    '1. `bottleneckIds` 至少一个，且必须是**输入里出现过**的瓶颈 id。',
+    '2. `changes` 至少一项，`type` 只能是下面四类，并按类型给全字段（多给字段会被拒）：',
+    '   - `ast`：file, node, description（可选 before / after）',
+    '   - `asset`：file, operation（convert-webp | compress | resize）, params',
+    '   - `config`：file, key, before, after',
+    '   - `dependency`：reason（可选 remove / replace）',
+    `3. \`class\` 只能是 ${listOf(OPTIMIZATION_CLASSES)}：A=全自动（不改运行时语义），`,
+    '   B=半自动（改渲染/加载时序，需人工确认），C=仅建议。',
+    '4. `reversible: false` 的候选只能是 C 类。',
+    `5. \`expectedGain\` 的键取自：${listOf(METRIC_NAMES)}；数值单位与该指标一致（ms / byte / count）。`,
+    '   只写这个改法**真能改变**的指标：拆分 chunk 不会减少总字节数，压缩图片不会改善 LCP 的服务器部分。',
+    '   宁可少写，也不要写一个做不到的数字 —— 猜大的收益会在验证阶段直接被打回。',
+    `6. \`confidence\` 不超过 0.75；\`risk\` 取 ${listOf(RISK_LEVELS)}；\`effort\` 取 ${listOf(EFFORTS)}。`,
   ].join('\n');
 }
 
@@ -549,18 +746,36 @@ function buildDiagnoseSystemPrompt(): string {
     '你的任务是**复核与补充**，不是从零猜：',
     'A. 如果规则结论正确，不要重复它。',
     'B. 如果规则结论的归因太粗（比如只说"某个 chunk 大"），你可以给出更具体的归因，',
-    '   并在 refines 里写上那条规则的 bottleneck id。',
+    '   并在 `refines` 里写上那条规则的瓶颈 id。',
     'C. 补充规则漏掉的问题 —— 尤其是需要跨来源关联才能看出来的',
     '   （例如某个长任务与某个第三方脚本的加载时间重合）。',
     '',
-    '硬性要求：',
-    '1. 只输出 JSON 数组，不要解释文字或 markdown 代码块。',
-    '2. kind 必须是给定的枚举值之一，不能自造。',
-    '3. 每一条结论**必须**带至少一条 evidence，且 evidence 的 description 里要点明',
-    '   它是从输入的哪一项数据得出的。**没有证据的结论一律会被丢弃。**',
-    '4. attribution 必须符合 level 对应的结构（resource/dependency/source/component/config）。',
-    '5. severity 取 0-100；confidence 不要超过 0.75。',
-    '6. 如果输入的数据不足以支撑任何新结论，就输出空数组 []。',
+    '## 输出格式（严格遵守；不合规的整条会被丢弃）',
+    '',
+    '只输出 JSON 数组，不要解释文字、不要 markdown 代码块。每个元素形如：',
+    '',
+    JSON.stringify(DIAGNOSE_EXAMPLE, null, 2),
+    '',
+    '## 字段约束',
+    '',
+    '1. `kind` 必须**逐字**取自这个列表（不许自造，也不许拿指标名当种类）：',
+    `   ${listOf(BOTTLENECK_KINDS)}`,
+    '2. `evidence` 必须是**对象数组**（至少一条），每项的 `kind` 取自：',
+    `   ${listOf(EVIDENCE_KINDS)}`,
+    '   ⚠️ 输入里的 `ruleFindings[].evidence` 是给你**读**的字符串摘要，形状与你输出的不同：',
+    '   你输出的是对象，且 `description` 要点明这条结论是从输入的哪一项数据得出的。',
+    '   **没有证据的结论一律会被丢弃。**',
+    '3. `attribution` 按 `level` 给字段，**多给字段也会被拒**（每个 level 都是 strict）：',
+    '   - resource: url, size, contentType',
+    '   - dependency: name, version（可为 null）, size',
+    '   - source: file, line, column（可为 null）, component（可为 null）',
+    '   - component: name, file（可为 null）, line（可为 null）, renderCount（可为 null）',
+    '   - config: file, key',
+    `4. \`impact\` 是"指标名 → 数值"的对象，键取自：${listOf(METRIC_NAMES)}。`,
+    '   只写你**确有数据支撑**的指标；一个都没有就写 `{}`。',
+    '5. `severity` 取 0-100；`confidence` 不要超过 0.75。',
+    '6. `refines` 只在"你在复核某条规则结论"时出现，值是那条规则的瓶颈 id；否则整个字段不要写。',
+    '7. 输入数据不足以支撑任何新结论时，输出 `[]`。',
     '   **宁可什么都不说，也不要编一个看起来合理但没有数据支撑的问题。**',
   ].join('\n');
 }
@@ -582,7 +797,14 @@ function buildDiagnoseUserPrompt(input: LlmDiagnoseInput): string {
         severity: b.severity,
         impact: b.impact,
         attribution: b.attribution,
-        evidence: b.evidence.map((e) => e.description),
+        /**
+         * 证据**按对象的形状**给，只省略 payload。
+         *
+         * 早先这里传的是 `e.description`（字符串数组），于是模型照着输出字符串，
+         * 而 schema 要的是对象 —— 5 条结论全被丢掉。**给模型看什么形状，
+         * 它就会还什么形状**，这一点比 prompt 里写十行说明都管用。
+         */
+        evidence: b.evidence.map((e) => ({ kind: e.kind, description: e.description })),
       })),
     },
     null,
@@ -594,3 +816,21 @@ function buildDiagnoseUserPrompt(input: LlmDiagnoseInput): string {
 export function renderDiagnosePrompt(input: LlmDiagnoseInput): string {
   return buildDiagnoseUserPrompt(input);
 }
+
+/**
+ * 供测试使用的 prompt 契约出口。
+ *
+ * 存在的意义只有一个：让 `prompt-contract.test.ts` 能验两件事。
+ *
+ * 1. **示例本身合法** —— 用**真正的 schema** 校验。类型标注管得住字段名，
+ *    管不住跨字段 refine 与 `.strict()`，而那两条恰恰是运行时真正生效的。
+ * 2. **枚举逐字出现在 prompt 里** —— 枚举加了新值、prompt 没跟上时，
+ *    模型会给出"看着合理但不在枚举里"的种类（真实发生过：拿指标名 `IMAGE_SIZE`
+ *    当瓶颈种类），整条结论被丢弃：花了钱、零产出，报错还像是模型不听话。
+ */
+export const LLM_PROMPT_CONTRACT = {
+  plan: buildPlanSystemPrompt,
+  diagnose: buildDiagnoseSystemPrompt,
+  planExample: PLAN_EXAMPLE,
+  diagnoseExample: DIAGNOSE_EXAMPLE,
+} as const;

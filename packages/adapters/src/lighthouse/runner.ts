@@ -58,7 +58,7 @@ export function createLighthouseRunner(options: LighthouseRunnerOptions = {}): R
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      throw new AdapterError(`lighthouse 执行失败: ${message}`, {
+      throw new AdapterError(`lighthouse 执行失败: ${describeLighthouseFailure(message, url)}`, {
         code: 'ADAPTER_FAILED',
         stage: 'collect',
         retryable: true,
@@ -105,6 +105,30 @@ export async function probeLighthouse(bin?: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+/**
+ * 把 Lighthouse 的原话翻译成"下一步该做什么"。
+ *
+ * 它的原始报错是写给浏览器工程师看的：`Chrome prevented page load with an
+ * interstitial`。而真正常见的原因九成是**预览服务没起** —— Chrome 打开的其实
+ * 是"无法访问此网站"页面。用户看到的是"lighthouse 采集失败"，于是去查 Chrome、
+ * 查版本、查权限，唯独不会想到"我忘了起服务"。
+ *
+ * 只在能确定的情况上加提示：认不出来就原样透传，不硬编一个猜测。
+ */
+export function describeLighthouseFailure(message: string, url: string): string {
+  const oneLine = message.trim().replace(/\s+/g, ' ');
+
+  if (oneLine.includes('interstitial')) {
+    return (
+      `Chrome 打不开 ${url}（被拦在了错误页），最常见的原因是**预览服务没在跑** —— ` +
+      `先在另一个终端把它起起来，并用 curl ${url} 确认返回 200 再重测。` +
+      `Lighthouse 原话：${oneLine}`
+    );
+  }
+
+  return oneLine;
 }
 
 /**

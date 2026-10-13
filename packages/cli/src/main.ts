@@ -1,6 +1,7 @@
 import { Command } from 'commander';
 import { CORE_VERSION } from '@yuki-byte18/core';
 import type { ExitCode } from '@yuki-byte18/shared';
+import { doctor } from './commands/doctor.js';
 import { execute, type ExecuteOptions } from './commands/execute.js';
 import { fix, type FixOptions } from './commands/fix.js';
 import { history } from './commands/history.js';
@@ -45,6 +46,7 @@ export function buildProgram(deps: MainDeps = {}): Command {
       .command('run')
       .description('跑完整闭环：采集 → 诊断 → 方案 → 决策 → 执行 → 验证 → 保留/回滚 → 报告')
       .option('--dry-run', '只生成 patch，不修改工作区')
+      .option('--preview', '自己起项目的预览服务（preview / dev 脚本），跑完自动停')
       .option('--ci', 'CI 模式：门禁未通过时返回退出码 1')
       .option('--max-regression <score>', '覆盖配置里的 max_regression（临时放宽/收紧门禁）'),
   ).action(async (options: ExecuteOptions) => {
@@ -168,6 +170,19 @@ export function buildProgram(deps: MainDeps = {}): Command {
         );
       },
     );
+
+  program
+    .command('doctor')
+    .description('体检：Node / 配置 / git 状态 / 测量地址 / Lighthouse / LLM key，每条给可执行的修法')
+    .option('-c, --config <path>', '配置文件路径', '.perfpilot.yml')
+    .action(async (options: { config?: string }) => {
+      deps.onExit?.(
+        await doctor({
+          cwd,
+          ...(options.config !== undefined ? { configPath: options.config } : {}),
+        }),
+      );
+    });
 
   return program;
 }

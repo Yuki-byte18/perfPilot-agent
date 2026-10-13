@@ -1,13 +1,19 @@
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import {
   EXIT_CODES,
   exitCodeForError,
+  parseJsonText,
   toPerfPilotError,
   type Device,
   type ExitCode,
   type LogLevel,
 } from '@yuki-byte18/shared';
+import { startPreviewServer, type PreviewServer } from '@yuki-byte18/adapters';
 import { evaluateCiGate, publishCiReport } from '@yuki-byte18/core';
-import { bootstrap, type BootstrapOptions, type CliContext } from '../bootstrap.js';
+import { bootstrap, resolvePackageManager, type BootstrapOptions, type CliContext } from '../bootstrap.js';
+import { loadConfig } from '../config-loader.js';
+import { init } from './init.js';
 import {
   exitCodeForSummary,
   runRoutes,
@@ -182,6 +188,14 @@ export interface ExecuteOptions extends CommonCommandOptions {
   ci?: boolean;
   /** 覆盖配置里的 max_regression（临时放宽/收紧） */
   maxRegression?: string;
+  /**
+   * 自己把预览服务起起来（跑完自动停）。
+   *
+   * 缺了它，用户必须记得"另开一个终端跑 `npm run preview`" —— 忘了的话
+   * Lighthouse 只会报一句"Chrome 拦在了错误页"，LCP/CLS/TBT 整块缺失，
+   * 而报告里只写"该来源不可用"。
+   */
+  preview?: boolean;
   /** 注入点：测试把 adapter 换成 fixture，整条链路不再需要网络 */
   bootstrap?: Partial<BootstrapOptions>;
 }
@@ -209,6 +223,91 @@ export async function execute(options: ExecuteOptions): Promise<ExitCode> {
      */
     const apply = options.apply;
 
+    /**
+     * 没有配置文件、但给了 `--url`：顺手生成一份（等价于 `init --yes`）。
+     *
+     * "先 init 再跑 run" 对用户是纯摩擦 —— 他要测的地址本来就在命令行里。
+     * 只在**文件不存在**时动手：配置存在但不合法时，该由校验器报出真实原因，
+     * 而不是被这里悄悄重写掉。
+     */
+    const configPath = parsed.configPath ?? join(options.cwd, '.perfpilot.yml');
+    const hasConfig = await readFile(configPath, 'utf8')
+      .then(() => true)
+      .catch(() => false);
+
+    if (!hasConfig && parsed.url !== undefined) {
+      const generated = await init({
+        cwd: options.cwd,
+        url: parsed.url,
+        ...(parsed.configPath !== undefined ? { configPath: parsed.configPath } : {}),
+        yes: true,
+        out: () => undefined,
+      });
+
+      if (generated !== EXIT_CODES.OK) {
+        process.stdout.write('\n❌ 自动生成配置失败 —— 先手动跑一次 `perfpilot init`\n');
+        return generated;
+      }
+
+      process.stdout.write(
+        `\nℹ️  没有找到配置，已按 ${parsed.url} 自动生成一份（等价于 perfpilot init --yes）\n`,
+      );
+    }
+
+    /**
+     * `--preview`：自己把预览服务起起来，跑完停掉。
+     *
+     * 价值不在省事，而在**消灭一个静默失败**：服务没起时 Chrome 打不开地址，
+     * Lighthouse 报"拦在了错误页"，LCP/CLS/TBT 整块缺失 —— 而报告只会写
+     * "该来源不可用"，用户得自己反推出"哦，我没起服务"。实测踩过两次。
+     */
+    let previewServer: PreviewServer | null = null;
+
+    if (options.preview === true) {
+      const loaded = await loadConfig({
+        cwd: options.cwd,
+        ...(parsed.configPath !== undefined ? { configPath: parsed.configPath } : {}),
+      });
+      const targetUrl = parsed.url ?? loaded.config.target.url;
+
+      let scripts: Record<string, string> = {};
+      try {
+        const raw = parseJsonText(await readFile(join(options.cwd, 'package.json'), 'utf8')) as {
+          scripts?: Record<string, string>;
+        };
+        scripts = raw.scripts ?? {};
+      } catch {
+        // 没有 package.json：按"找不到脚本"处理
+      }
+
+      // preview 优先于 dev：dev server 发的是未打包源码，指标没有可比性
+      const script =
+        scripts['preview'] !== undefined ? 'preview' : scripts['dev'] !== undefined ? 'dev' : null;
+
+      if (script === null) {
+        process.stdout.write('\n⚠️  项目里没有 preview / dev 脚本，--preview 无可执行\n');
+      } else {
+        let port: string | undefined;
+        try {
+          const parsedUrl = new URL(targetUrl);
+          if (parsedUrl.port !== '') port = parsedUrl.port;
+        } catch {
+          // 地址不合法：交给配置校验去报
+        }
+
+        process.stdout.write(`\n▶ 起预览服务（${script}），等它就绪…\n`);
+        previewServer = await startPreviewServer({
+          root: options.cwd,
+          packageManager: await resolvePackageManager('auto', options.cwd),
+          script,
+          ...(port === undefined ? {} : { port }),
+          url: targetUrl,
+          onOutput: (chunk) => process.stdout.write(chunk),
+        });
+        process.stdout.write(`✅ 预览服务已就绪：${targetUrl}\n`);
+      }
+    }
+
     const ctx = await bootstrap({
       cwd: options.cwd,
       ...(parsed.configPath !== undefined ? { configPath: parsed.configPath } : {}),
@@ -219,7 +318,11 @@ export async function execute(options: ExecuteOptions): Promise<ExitCode> {
       apply,
       ...options.bootstrap,
     });
-    dispose = ctx.dispose;
+    dispose = () => {
+      ctx.dispose();
+      // 预览服务必须跟着收掉：留着会占住端口，下一次 --strictPort 直接失败
+      void previewServer?.stop();
+    };
 
     if (parsed.output !== 'quiet') {
       process.stdout.write(

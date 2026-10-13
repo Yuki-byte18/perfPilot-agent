@@ -9,6 +9,7 @@ import {
   type RawRunner,
 } from '@yuki-byte18/shared';
 import { BUNDLE_SCAN_KIND } from './parse.js';
+import { attachSourcePaths } from './source-assets.js';
 import type { BundleScanPayload } from './schema.js';
 
 export const DEFAULT_DIST_DIR = 'dist';
@@ -116,7 +117,11 @@ export function createBundleAnalyzerRunner(
 
     let files: BundleScanPayload['files'];
     try {
-      files = await walk(distDir, distDir, maxFiles);
+      // 源文件映射在下面统一补：`walk` 只认识磁盘上的产物
+      files = (await walk(distDir, distDir, maxFiles)).map((file) => ({
+        ...file,
+        sourcePath: null,
+      }));
     } catch (err) {
       throw new AdapterError(`构建产物目录不可读: ${distDir}`, {
         code: 'ADAPTER_FAILED',
@@ -140,6 +145,14 @@ export function createBundleAnalyzerRunner(
     // package.json 在项目根，不在 dist 里
     const projectRoot = options.root ?? process.cwd();
     const packageJson = readPkg ? await readPackageJson(projectRoot) : null;
+
+    /**
+     * 图片类产物尽量映射回**源文件**（见 `source-assets.ts`）。
+     *
+     * 少了这一步，图片候选会一直"跳过：文件不存在" —— 因为产物名带构建哈希，
+     * 而源文件叫另一个名字。实测：三条图片候选产出 0 份 patch。
+     */
+    files = await attachSourcePaths(files, { projectRoot, distDir });
 
     const payload: BundleScanPayload = { distDir, source, files, modules, packageJson };
 

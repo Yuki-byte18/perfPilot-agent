@@ -810,6 +810,7 @@ memory:
 ## 12. CLI 命令
 
 ```bash
+perfpilot doctor     # 体检前提条件：Node / 配置 / git 状态 / 测量地址能否打开 / Lighthouse / LLM key
 perfpilot init       # 生成 .perfpilot.yml（检测项目状态，只问测量地址）
 perfpilot run        # 跑完整闭环：采集→诊断→方案→决策→执行→验证→保留/回滚→报告
 perfpilot diagnose   # 只诊断，产报告，不改任何代码
@@ -817,6 +818,10 @@ perfpilot fix        # 基于最近一次诊断执行修复（可 --dry-run 只�
 perfpilot serve      # 启动只读报告服务（API + Web 报告页）
 perfpilot history    # 查看历史记录（诊断趋势 / 方案成功率 / 失败记忆）
 ```
+
+> `doctor` 是这一组里唯一"不干活"的命令，但它的位置在最前面：这个工具最容易
+> 失败的方式不是报错，而是**什么都不做还看起来正常**（补丁不应用、指标测不到、
+> agent 不干活）。它把那些前提逐条查出来，并给出可直接执行的修法。
 
 常用参数：
 
@@ -828,6 +833,7 @@ perfpilot init --ci github                         # 同时生成性能门禁流
 perfpilot init --force                             # 覆盖已存在的配置
 perfpilot run --url https://staging.example.com --routes /,/dashboard
 perfpilot run --dry-run                  # 只产出 patch，不改工作区
+perfpilot run --preview                  # 自己起预览服务（preview / dev 脚本），跑完自动停
 perfpilot run --ci                       # CI 模式：门禁未通过返回退出码 1
 perfpilot run --ci --max-regression 5    # 临时放宽抖动阈值
 perfpilot diagnose --baseline main --compare
@@ -1547,6 +1553,79 @@ M8 之后对整个项目做了一次通盘审计，目标是**消灭"说了没�
 **两条新测试**：一条验"生成 CI 文件后 `tools/perfpilot/` 确实进了 `.gitignore`"（路径是从生成的 workflow 里抠出来的，不在测试里抄第二份字面量），一条验"不生成 CI 文件时不写那一行"（不给不用 CI 的项目塞一条它看不懂的规则）。
 
 **验证方式**：不是只看单测绿。用构建好的 CLI 在一个临时项目里真跑了一遍 `init --yes --ci github`，逐行核对生成的 `.gitignore`（两条规则 + 各自的理由注释）与 workflow 里的检出路径是否一致。
+
+### 16.12 第一次真调 LLM：付了钱、零产出
+
+这一轮把 LLM 路径从"写了但从没真跑过"变成"真跑通"，而它一次暴露了六件事。
+**先说最反直觉的那条**：第一次真调的钱没白花 —— 11 条结论/候选**全部**被 schema 拒掉，
+决策层一条都没拿到。安全网（"输出必须过校验，不合规逐条丢弃"）按设计工作了；
+坏的是 prompt 与 schema 说的不是一回事。
+
+| 问题 | 症状 | 根因 | 修法 |
+| --- | --- | --- | --- |
+| 工厂建出来的 client 上**没有** `.openai` 属性 | 配了 DeepSeek 却报 `OpenAI API key is missing`；更坏的一种：环境里恰好有 `OPENAI_API_KEY` 时，请求真的发去 **api.openai.com**，用户以为在用 DeepSeek、账单来自 OpenAI | `client[providerExport] ?? provider[providerExport]` 里的 `??` **静默回退到默认 provider** —— 它丢掉 apiKey 与 base_url | 显式挑模型工厂（client 本身 / `.chat` / `.languageModel`）；工厂建出来的 client 找不到工厂就报"版本不兼容"，**不再静默兜底**。补 5 条形状回归测试（含一条用真实 SDK、不联网） |
+| prompt 只说"kind 必须是给定枚举值之一"，**却从没给出枚举** | 模型编出 `kind: "IMAGE_SIZE"`（一个指标名），整条被拒 | prompt 与 schema 是两份人工维护的说明，靠自觉保持一致 | prompt 里的枚举**从常量生成**（`BOTTLENECK_KINDS` 等），示例用 `LlmFindingDraft` / `LlmCandidateDraft` 标注（编译期就校验）；`prompt-contract.test.ts` 再用**真 schema** 校验示例，并断言每个枚举值都逐字出现在 prompt 里 |
+| 输入里把证据渲染成**字符串数组** | 模型照着输出字符串数组，而 schema 要对象：`evidence.0: Expected object, received string` | **给模型看什么形状，它就还什么形状** —— 这比 prompt 里写十行说明管用 | 输入改成对象（省略 payload），并给两处 prompt 都配上完整示例 |
+| 候选要求模型提供 `runId` / `origin` / `ruleId` / `promptVersion` / `recalledFrom` / `bottleneckKinds` | 每条候选都因 `runId: Required` 被拒，报错看着还像"模型不听话" | 这些字段**我们自己就知道**（盖章、记忆层、可从 `bottleneckIds` 反查），却让模型猜 | 新增 `LlmCandidateSchema`（草稿）：只问模型"只有它才知道的"；补齐后**仍要过一遍完整的 `CandidateSchema`**（跨字段 refine 与 strict 在这一遍生效）。未知字段**丢弃而不报错** —— 模型常把 prompt 里的字段原样回抄，为这种无害的多余字段丢掉一条已付费候选是纯浪费 |
+| 校验失败的告警里只有 zod 的字段名 | 看不到模型到底说了什么，"为什么形状不对"只能猜 —— 每轮调 prompt 都是盲调 | 没把原始回复留下来 | 告警里附上原始输出（截断 800 字）；`impact` 缺失时也放宽为默认 `{}`（它是补充信息，不该让整条结论作废） |
+| `execute` 的跳过原因是**写死的一句话** | 同一份报告上面写 `apply 1 / confirm 1`，下面写"没有 apply / confirm 裁决的候选" | 只读运行（`diagnose`）也走同一个分支，原因没按真实条件判 | 逐条判：未注入执行编排 / **只读运行** / 没有候选 / 没有 apply·confirm 裁决 |
+
+**第一次真调的数据**：2 次调用、共 **$0.0051**、6.3s + 5.2s。成本不是问题，
+"零产出"才是 —— 而零产出能被如实报告（报告写着"0 条来自 LLM"、11 条丢弃各有告警），
+这件事本身说明这条链路的设计是对的。
+
+**修复后复跑（同一个项目，`diagnose`）**：
+
+| | 修复前 | 修复后 |
+| --- | --- | --- |
+| 诊断 | `findings: 5 → adopted: 0`（全被拒） | `findings: 4 → adopted: 4`，其中 **1 条复核**了规则结论 |
+| 瓶颈 | 5（全来自规则） | **8**（LLM 补了 3 个规则没看到的问题） |
+| 方案 | `llmCandidates: 0` | LLM 出 9 条候选，与规则去重后 7 条进决策 |
+| 决策 | apply 1 / confirm 1 / reject 3 | **apply 3 / confirm 4 / reject 8** |
+| 花费 | $0.0051 | $0.0074 |
+
+差别全在**"prompt 有没有把契约说清楚"**上 —— 一行解析逻辑都没改，
+模型换了个说法就从不合规变成可用。这条最值得记：**调 LLM 时先怀疑自己没说清，
+再怀疑模型不行。**
+
+### 16.13 真实项目上的第三轮：三个"不是 bug，只能靠猜"的坑 + `doctor`
+
+`run --dry-run` 在一个真实 Vite 项目上跑通了全链路（agent 采纳 3 条、12 个候选、
+裁决 apply 3 / confirm 3），但 `execute` 那行写着**产出 0 份 patch** —— 6 条跳过里
+藏着三件性质完全不同的事：
+
+| 报告里那句话 | 性质 | 真相 | 处理 |
+| --- | --- | --- | --- |
+| `没有执行器能处理改动类型 asset/ast` | **真 bug** | LLM 把 `asset` 与 `ast` 混在**同一个候选**里。`routeFor` 正确判了 `manual`，但分数够高时 `verdict` 仍是 `apply` —— 于是报告自相矛盾：上面 `apply 3`、下面"0 份 patch"，真正的原因藏在执行阶段的备注里 | 决策层加一道钳制：`manual` 路由的候选最多只能到 `suggest`，原因写进 `reasons`。加了单测钉住 |
+| `跳过：文件不存在：assets/promo-…-BjZS4kAo.png` | **真 bug（已修）** | bundle 扫描给的是 **dist 里的名字（带构建哈希）**，而源文件在 `public/` 或 `src/assets/`，哈希是构建时加上的。按这个路径找文件必然落空 → **图片优化在真实项目里永远不会执行** | 新增 `adapters/bundle-analyzer/source-assets.ts`：① 优先读 Vite 清单（`dist/.vite/manifest.json`）的 `file → src`；② 路径本身就是源文件时直接用；③ 去哈希 + 在常见资源目录／有上限的全项目搜索里找**唯一**同名文件。**多命中一律放弃**（改错图的代价是静默改坏无关的图）。只映射图片，`index.html` / `assets/*.js` 这类产物路径保持原样（渲染阻塞与体积汇总要靠它们判断）。产物清单因此多了 `sourcePath` 字段 |
+| `未写入工作区（dry-run 只产出补丁）` | 正常 | dry-run 就该如此 | 无 |
+
+**另外两件"工具自己造成的摩擦"**（都不是 bug，但都要靠看日志猜）：
+
+1. **85 个 `.perfpilot/` 文件被 git 跟踪**（在 `.gitignore` 那条规则之前就提交过）。
+   于是每跑一轮工作区就是脏的，守卫永远拒绝应用补丁，而报告写的原因却是"工作区
+   不干净" —— 指向用户自己的改动。用户得先手动 `git rm -r --cached .perfpilot`
+   才能让工具开始干活。
+   → **守卫改成排除 `.perfpilot/**`**：它是**工具自己**写的东西，跟"用户代码状态"
+   无关；守卫的本意只是别把用户未提交的改动用 `reset --hard` 抹掉。实测：只改被
+   跟踪的 `memory.db` 判为干净，再动用户的 `app.js` 仍然判脏。
+2. **预览服务没起** → Lighthouse 报"Chrome 拦在了错误页"，LCP/CLS/TBT 整块缺失；
+   **`DEEPSEEK_API_KEY` 没设** → agent 静默降级为纯规则库。两条都不是错误，
+   但都得从日志里反推。
+
+于是新增 **`perfpilot doctor`**：一条命令把这些前提全查一遍，**每条结论都给可直接
+执行的修法**（从"检测到问题"直接接到"敲什么命令"）。结构上 IO 与判断分离：
+`gatherFacts()` 负责所有读取，`runChecks()` 是纯函数 —— 因此"哪条会红、红的时候说
+什么"能被 14 条测试覆盖，而不是只测"它没崩"。退出码：有 ❌ 返回 2，只有 ⚠️ 返回 0
+（警告不影响使用，不该让脚本以为失败了）。
+
+**第一次真跑就验证了它的价值**：在同一个项目上，一条命令报了"地址打不开（并给出
+这个项目的 `npm run preview -- --port 4173`）"、"`DEEPSEEK_API_KEY` 没设"、
+"CI 文件里还有 CHANGE_ME"，并明确写出代价：**❌ 的项不修，`run` 会安静地什么都不做。**
+
+**教训**（与 §16.12 是同一条）：这个工具最容易失败的方式不是"报错"，而是
+**什么都不做、看起来还正常**：补丁不应用（守卫）、指标测不到（服务没起）、
+agent 不干活（key 没设）。所以"前提检查"得是一等公民，不能留给用户去读日志。
 
 ---
 

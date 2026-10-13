@@ -11,17 +11,22 @@ import {
 } from './components.js';
 import {
   STATUS_LABEL,
+  VERDICT_LABEL,
+  buildAgentView,
   buildCollection,
   buildHeadline,
   buildMetricRows,
+  buildNextSteps,
   buildOverview,
   buildStages,
   buildTimeline,
   describeAttribution,
   describeImpact,
+  describeRunMode,
   formatMetric,
   formatMetricValue,
   formatNumber,
+  type AgentView,
   type CollectionView,
   type StageView,
   type Tone,
@@ -52,9 +57,26 @@ export function OverviewView({ detail }: { detail: RunDetail }): JSX.Element {
   const overview = buildOverview(detail);
   const collection = buildCollection(detail);
   const stages = buildStages(detail.run);
+  const mode = describeRunMode(detail);
+  const steps = buildNextSteps(detail, mode);
 
   return (
     <>
+      {/*
+        第一块是"这次运行是什么模式"，而不是数字。
+        原因见 `describeRunMode`：只读诊断/演练会让"改动"那一组全是 0，
+        而一串 0 最容易被读成"工具什么都没干、或者坏了"。
+      */}
+      <section className={`runmode runmode-${mode.mode}`}>
+        <div className="runmode-label">
+          <span>本次运行</span>
+          <Badge tone={mode.changesExpected ? 'good' : 'neutral'}>{mode.label}</Badge>
+        </div>
+        <p className="runmode-explain">
+          <Emphasized text={mode.explain} />
+        </p>
+      </section>
+
       <section className={`headline headline-${headline.tone}`}>
         <p className="headline-text">{headline.text}</p>
         <ul className="headline-facts">
@@ -64,55 +86,269 @@ export function OverviewView({ detail }: { detail: RunDetail }): JSX.Element {
         </ul>
       </section>
 
-      <div className="overview">
-        <Stat label="采集指标" value={overview.metricCount} hint="这一轮实际拿到的指标条数" />
-        <Stat
-          label="可比指标"
-          value={overview.comparableCount}
-          hint="既有本次值、又有基线值的指标数量；其余只显示当前值"
-        />
-        <Stat
-          label="改善"
-          value={overview.improvedCount}
-          tone={overview.improvedCount > 0 ? 'good' : 'neutral'}
-          hint="分数比基线高的指标数"
-        />
-        <Stat
-          label="回归"
-          value={overview.regressionCount}
-          tone={overview.regressionCount > 0 ? 'bad' : 'good'}
-          hint="分数比基线低的指标数 —— CI 门禁拦的就是这个"
-        />
-        <Stat label="瓶颈" value={overview.bottleneckCount} hint="诊断阶段归因出的问题数" />
-        <Stat
-          label="产出补丁"
-          value={overview.patchCount}
-          hint="执行阶段真的产出了 patch 或文件改动的候选数"
-        />
-        <Stat
-          label="保留改动"
-          value={overview.keptCount}
-          tone={overview.keptCount > 0 ? 'good' : 'neutral'}
-          hint="通过验证并被记入仓库历史的改动"
-        />
-        <Stat
-          label="回滚改动"
-          value={overview.rolledBackCount}
-          tone={overview.rolledBackCount > 0 ? 'warn' : 'neutral'}
-          hint="没通过验证、已被自动回滚的改动"
-        />
-        <Stat
-          label="待人工确认"
-          value={overview.needsConfirmation}
-          tone={overview.needsConfirmation > 0 ? 'warn' : 'neutral'}
-          hint="B 类候选：补丁已生成，等你决定要不要用"
-        />
-      </div>
+      <Card
+        title="这一轮的数字"
+        subtitle="按「测到了什么 → 发现了什么 → 改了什么」分组，从上往下读就行。"
+      >
+        <div className="stat-group">
+          <div className="stat-group-title">① 测到了什么</div>
+          <div className="overview">
+            <Stat
+              label="测到的指标"
+              value={overview.metricCount}
+              hint="这一轮实际拿到的指标条数（LCP、体积、请求数…）"
+            />
+            <Stat
+              label="能和上次比的"
+              value={overview.comparableCount}
+              hint="既有本次值、又有基线值的指标；第一次运行没有基线，这里是 0 属于正常"
+            />
+            <Stat
+              label="可用的数据来源"
+              value={`${collection.okSources} / ${collection.sources.length}`}
+              tone={collection.failedSources > 0 ? 'warn' : 'neutral'}
+              hint="Lighthouse / 产物分析 / HAR / trace / web-vitals；来源不可用会让对应指标整块缺失"
+            />
+          </div>
+        </div>
+
+        <div className="stat-group">
+          <div className="stat-group-title">② 发现了什么</div>
+          <div className="overview">
+            <Stat
+              label="发现的问题"
+              value={overview.bottleneckCount}
+              hint="已经定位到具体文件 / 依赖 / 请求上的问题（报告里叫「瓶颈」）"
+            />
+            <Stat
+              label="比上次变差的"
+              value={overview.regressionCount}
+              tone={overview.regressionCount > 0 ? 'bad' : 'good'}
+              hint="分数比基线低的指标数 —— CI 门禁拦的就是这个"
+            />
+            <Stat
+              label="比上次变好的"
+              value={overview.improvedCount}
+              tone={overview.improvedCount > 0 ? 'good' : 'neutral'}
+              hint="分数比基线高的指标数"
+            />
+          </div>
+        </div>
+
+        <div className="stat-group">
+          <div className="stat-group-title">③ 改了什么</div>
+          <div className="overview">
+            <Stat
+              label="准备好了的改动"
+              value={overview.patchCount}
+              hint="已经生成补丁的改动：可能只是评估，也可能真的写进了工作区"
+            />
+            <Stat
+              label="已采纳"
+              value={overview.keptCount}
+              tone={overview.keptCount > 0 ? 'good' : 'neutral'}
+              hint="应用后重新测量确认有效、已经提交进仓库的改动"
+            />
+            <Stat
+              label="试了又撤销"
+              value={overview.rolledBackCount}
+              tone={overview.rolledBackCount > 0 ? 'warn' : 'neutral'}
+              hint="应用后测量没变好，已自动回滚到原样的改动 —— 这是设计好的保护"
+            />
+            <Stat
+              label="等你点头"
+              value={overview.needsConfirmation}
+              tone={overview.needsConfirmation > 0 ? 'warn' : 'neutral'}
+              hint="补丁已生成、但需要人看一眼的改动（例如换图片格式要同步改引用）"
+            />
+          </div>
+        </div>
+
+        {mode.changesExpected ? null : (
+          <p className="muted small">
+            「改了什么」这一组全是 0，是因为本次运行是「{mode.label}」—— 见页面最上面那条说明。
+          </p>
+        )}
+      </Card>
+
+      {steps.length === 0 ? null : (
+        <Card title="接下来做什么" subtitle="根据这一轮的情况给你的下一步，命令可以直接粘进终端。">
+          <ul className="next-steps">
+            {steps.map((step) => (
+              <li key={step.text}>
+                <Emphasized text={step.text} />
+              </li>
+            ))}
+          </ul>
+        </Card>
+      )}
+
+      <Agent view={buildAgentView(detail)} />
 
       <Stages stages={stages} />
       <Sources collection={collection} />
       <Warnings detail={detail} />
+      <Glossary />
     </>
+  );
+}
+
+/**
+ * 把文案里的 `**重点**` 渲染成 `<strong>`。
+ *
+ * 文案（"这次没有动你的代码"）与排版（哪里加粗）写在一起，比给每段配一个
+ * CSS 类好维护 —— 这些句子是要给人读的，改起来必须顺手。
+ */
+function Emphasized({ text }: { text: string }): JSX.Element {
+  const parts = text.split('**');
+
+  return (
+    <>
+      {parts.map((part, index) =>
+        index % 2 === 1 ? <strong key={index}>{part}</strong> : <span key={index}>{part}</span>,
+      )}
+    </>
+  );
+}
+
+/**
+ * 术语表。
+ *
+ * 报告里的词（瓶颈 / 候选 / 裁决 / 补丁 / 回滚…）对写工具的人是常识，
+ * 对第一次打开的人不是。放进折叠块：不占版面，但想看的人随时能看到。
+ */
+function Glossary(): JSX.Element {
+  return (
+    <Card title="术语表" subtitle="报告里反复出现的几个词，用人话解释一遍。">
+      <details className="tl-detail">
+        <summary>展开看这几个词是什么意思</summary>
+        <dl className="glossary">
+          <dt>瓶颈</dt>
+          <dd>页面里拖慢加载的具体问题，已经定位到文件、依赖或请求上（例如"某张图 982KB"）。</dd>
+          <dt>候选</dt>
+          <dd>针对某个瓶颈提出的一条改动方案，写明了预期能改善什么、有多大把握。</dd>
+          <dt>裁决</dt>
+          <dd>
+            要不要做这条改动：<strong>自动做</strong>（A 类）、<strong>等你确认</strong>（B 类）、
+            <strong>只给建议</strong>（C 类）、或者<strong>不值得做</strong>（打回）。
+          </dd>
+          <dt>补丁 / patch</dt>
+          <dd>改动的具体内容（改哪个文件、改成什么），可以直接读，也可以手动应用。</dd>
+          <dt>保留 / 回滚</dt>
+          <dd>改动应用后重新测一遍：确实变好就"保留"并提交，没变好就"回滚"回原样。</dd>
+          <dt>基线</dt>
+          <dd>用来比较的那一次运行。默认是同一路由、同一设备的上一次运行。</dd>
+          <dt>归因</dt>
+          <dd>把"慢"落到具体位置：哪个文件、哪个依赖、哪一行、哪个网络请求。</dd>
+          <dt>证据</dt>
+          <dd>支撑一条结论的原始数据（体积、时长、请求记录）。没有证据的结论工具会直接丢掉。</dd>
+        </dl>
+      </details>
+    </Card>
+  );
+}
+
+/**
+ * 诊断 agent（LLM）这一轮做了什么。
+ *
+ * ## 为什么值得单独一块
+ *
+ * 报告里"8 个瓶颈"看不出**谁提的**，而规则与 LLM 的可信度不是一回事：
+ * 规则是确定性的、每次跑都一样；LLM 依赖模型与采样，结论虽说带证据，
+ * 也可能"形状合规但没用"。把它的产出、花费与去向单独摆出来，
+ * 读报告的人才能决定"这一条要不要信"。
+ *
+ * 没开 LLM 时这块**照样显示**，只说清"这一轮没用 LLM" ——
+ * 藏起来会让人把"报告里没有"读成"不存在这回事"。
+ */
+function Agent({ view }: { view: AgentView }): JSX.Element {
+  if (!view.ran) {
+    return (
+      <Card
+        title="🤖 诊断 agent"
+        subtitle="LLM 只参与诊断与方案生成，不参与决策 —— 决策必须可复现。"
+      >
+        <p className="muted">
+          这一轮没有使用 LLM（配置里 <code>llm.provider</code> 是 <code>none</code>，
+          或调用失败已按设计降级为纯规则库）。上面的瓶颈与候选全部来自确定性规则。
+        </p>
+      </Card>
+    );
+  }
+
+  return (
+    <Card
+      title="🤖 诊断 agent"
+      subtitle="LLM 只参与诊断与方案生成，不参与决策 —— 决策必须可复现。"
+      right={
+        <span className="muted small">
+          {view.findings.length} 条结论 · {view.candidateFromLlm} 个候选 · $
+          {view.costUsd.toFixed(4)}
+        </span>
+      }
+    >
+      <div className="overview">
+        <Stat
+          label="新发现"
+          value={view.newCount}
+          tone={view.newCount > 0 ? 'good' : 'neutral'}
+          hint="规则库没看到、由 agent 补充出来的瓶颈"
+        />
+        <Stat
+          label="复核改写"
+          value={view.refinedCount}
+          tone={view.refinedCount > 0 ? 'good' : 'neutral'}
+          hint="规则给了结论、agent 把归因写得更具体的瓶颈"
+        />
+        <Stat
+          label="agent 的瓶颈占比"
+          value={`${view.findings.length} / ${view.bottleneckTotal}`}
+          hint="来自 agent 的瓶颈数 / 全部瓶颈数"
+        />
+        <Stat
+          label="agent 的候选占比"
+          value={`${view.candidateFromLlm} / ${view.candidateTotal}`}
+          hint="由 agent 提出的候选数 / 全部候选数"
+        />
+        <Stat
+          label="LLM 花费"
+          value={`$${view.costUsd.toFixed(4)}`}
+          hint="本轮累计（诊断 + 方案生成共用同一份预算）"
+        />
+      </div>
+
+      {view.verdicts.length === 0 ? null : (
+        <p className="muted small">
+          agent 提出的候选最终被裁决为：
+          {view.verdicts.map((v) => `${VERDICT_LABEL[v.verdict]} ${v.count} 个`).join('、')}
+          {view.promptVersions.length === 0
+            ? ''
+            : `（prompt 版本 ${view.promptVersions.join(' / ')}）`}
+        </p>
+      )}
+
+      {view.findings.length === 0 ? null : (
+        <ul className="agent-findings">
+          {view.findings.map((finding) => (
+            <li key={finding.id}>
+              <Badge tone={finding.refined ? 'neutral' : 'warn'}>
+                {finding.refined ? '复核规则结论' : '新发现'}
+              </Badge>{' '}
+              {finding.title}{' '}
+              <span className="muted small">
+                {finding.kind} · 严重度 {Math.round(finding.severity)} · 置信度{' '}
+                {(finding.confidence * 100).toFixed(0)}% · {finding.evidenceCount} 条证据
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <p className="muted small">
+        agent 的结论都带证据、置信度上限 75%，但<strong>形状合规不等于内容有用</strong> ——
+        这几条建议人工扫一眼再决定要不要采纳。完整证据在「诊断」页的每张卡片里。
+      </p>
+    </Card>
   );
 }
 
@@ -489,13 +725,29 @@ export function OptimizationView({ detail }: { detail: RunDetail }): JSX.Element
   return (
     <Card
       title="优化"
-      subtitle="以候选为主体：一个候选可能走到决策就停了（未执行），也可能生成了补丁等待人工确认。"
+      subtitle="每条是一份「改动方案」的完整经历：谁提的 → 要不要做 → 做了什么 → 测下来有没有用。"
       right={
         <span className="muted small">
           {entries.length} 个候选 · {withPatch} 份补丁 · {kept} 个已保留
         </span>
       }
     >
+      {/*
+        这一页术语最密（A/B/C 类、裁决、补丁、保留/回滚），所以先给一段"标注含义"。
+        没有它，读者只能从徽章颜色猜自己正在看什么。
+      */}
+      <p className="muted small">
+        标注含义：
+        <Badge tone="good">A 类</Badge> 确定且可以自动做 ·
+        <Badge tone="warn">B 类</Badge> 需要你看一眼再做（例如换图片格式要同步改引用）·
+        <Badge tone="neutral">C 类</Badge> 只是建议，不产出补丁。
+        右边的状态是它最后的结局：
+        <strong>已保留</strong>（测下来真的变好，已提交）/
+        <strong>已回滚</strong>（测下来没变好，已还原）/
+        <strong>等你确认</strong>（补丁好了，等你点头）/
+        <strong>未执行</strong>（判过不值得做）。
+      </p>
+
       <ol className="timeline">
         {entries.map((entry) => (
           <li key={entry.candidateId} className={`tl-item tl-${entry.status}`}>
@@ -503,6 +755,12 @@ export function OptimizationView({ detail }: { detail: RunDetail }): JSX.Element
               <Badge tone={entry.class === 'A' ? 'good' : entry.class === 'B' ? 'warn' : 'neutral'}>
                 {entry.class} 类
               </Badge>
+              {/* 谁提的必须标出来：规则是确定性的，LLM 依赖模型与采样 */}
+              {entry.origin === 'llm' ? (
+                <Badge tone="warn" title={`由 LLM 提出（prompt ${entry.promptVersion ?? '未知'}）`}>
+                  🤖 LLM
+                </Badge>
+              ) : null}
               <Badge tone={STATUS_TONE[entry.status] ?? 'neutral'}>{STATUS_LABEL[entry.status]}</Badge>
               <strong className="tl-title">{entry.title}</strong>
             </div>

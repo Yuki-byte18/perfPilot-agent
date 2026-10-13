@@ -68,7 +68,14 @@ function collectImages(ctx: RuleContext): ImageCandidate[] {
       if (!/\.(png|jpe?g|gif|webp|avif|svg)$/i.test(normalizeUrl(file.path))) continue;
       const key = identityKey(file.path);
       byKey.set(key, {
-        url: normalizeUrl(file.path),
+        /**
+         * 有源文件路径就用它。
+         *
+         * 产物名带构建哈希（`assets/promo-autumn-BjZS4kAo.png`），而"改这张图"
+         * 要改的是源文件 —— 拿产物路径去改必然落空，实测三条图片候选全部
+         * "跳过：文件不存在"，图片优化从来没真正执行过。
+         */
+        url: normalizeUrl(file.sourcePath ?? file.path),
         size: file.size,
         transferSize: file.size,
         mimeType: mimeTypeFromPath(file.path),

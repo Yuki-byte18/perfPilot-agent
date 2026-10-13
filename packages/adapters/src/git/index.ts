@@ -57,10 +57,42 @@ export function createGitAdapter(options: GitAdapterOptions): GitPort {
     }
   };
 
+  /**
+   * 判断工作区是否干净时，**把 PerfPilot 自己的运行产物排除在外**。
+   *
+   * ## 为什么必须排除
+   *
+   * `.perfpilot/` 是**工具自己**写的东西（运行记录 + 基线数据库）。它一旦被 git
+   * 跟踪 —— 在加上 `.gitignore` 那条规则**之前**就提交过，这在真实项目里很常见 ——
+   * 每跑一轮工作区就脏一次，于是改动守卫永远拒绝应用补丁，而报告给出的原因是
+   * "工作区不干净"，指向的却是用户自己的改动。
+   *
+   * 实测踩到过：一个项目里 85 个 `.perfpilot/` 文件被跟踪，用户必须先手动
+   * `git rm -r --cached .perfpilot` 才能让工具开始干活 —— 而这跟"用户的代码
+   * 状态"毫无关系。
+   *
+   * 排除它同时也**更符合守卫的本意**：守卫是为了别把用户未提交的改动
+   * 用 `reset --hard` 抹掉，而运行产物不是用户的改动。
+   */
+  const isCleanExceptArtifacts = (porcelain: string): boolean => {
+    const lines = porcelain
+      .split('\n')
+      .map((line) => line.trimEnd())
+      .filter((line) => line !== '');
+
+    if (lines.length === 0) return true;
+
+    return lines.every((line) => {
+      // 形如 ` M .perfpilot/memory.db` 或 `?? .perfpilot/runs/...`
+      const path = line.slice(3).replace(/^"(.*)"$/, '$1');
+      return path === '.perfpilot' || path.startsWith('.perfpilot/');
+    });
+  };
+
   return {
     async isClean(): Promise<boolean> {
       const out = await run(['status', '--porcelain']);
-      return out.trim() === '';
+      return isCleanExceptArtifacts(out);
     },
 
     async currentBranch(): Promise<string> {

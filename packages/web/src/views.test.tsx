@@ -207,12 +207,13 @@ describe('总览区块', () => {
   it('把结论、统计、阶段、来源、告警都渲染出来', () => {
     const html = render(<OverviewView detail={richDetail()} />);
 
-    // 结论句：有回归 → 说回归
-    expect(html).toContain('回归');
+    // 结论句 + 分组统计（标签是人话版，不再出现"回归 / 采集指标 / 待人工确认"这些术语）
     expect(html).toContain('headline');
-    // 统计项
-    expect(html).toContain('采集指标');
-    expect(html).toContain('待人工确认');
+    expect(html).toContain('测到的指标');
+    expect(html).toContain('比上次变差的');
+    expect(html).toContain('等你点头');
+    // 运行模式横幅：看懂报告的第一步
+    expect(html).toContain('runmode');
     // 阶段备注原样带出（verify skipped 的原因必须可见）
     expect(html).toContain('工作区不干净，拒绝自动应用改动');
     // 来源清单

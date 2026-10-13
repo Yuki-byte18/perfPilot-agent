@@ -47,6 +47,10 @@ pnpm build          # 六个包全部构建（含报告页）
 ```bash
 cd /path/to/your-project
 
+# 先体检：Node 版本、配置、git 状态、测量地址能不能打开、Lighthouse、LLM key
+# 每条结论都会给你"下一步敲什么命令"
+node /path/to/perfpilot-agent/packages/cli/dist/index.js doctor
+
 # 生成配置（自动识别包管理器、build 脚本、仓库；只问测量地址）
 node /path/to/perfpilot-agent/packages/cli/dist/index.js init
 
@@ -71,6 +75,7 @@ node /path/to/perfpilot-agent/packages/cli/dist/index.js run --url http://127.0.
 
 | 命令 | 做什么 |
 | --- | --- |
+| `perfpilot doctor` | **先跑这个**：体检环境（Node / 配置 / git 状态 / 测量地址能不能打开 / Lighthouse / LLM key），每条结论都给可直接执行的修法 |
 | `perfpilot init` | 生成 `.perfpilot.yml`，可选生成 CI 门禁文件（`--ci github|gitlab`） |
 | `perfpilot diagnose` | 只采集 + 诊断，产出报告，**不修改任何代码** |
 | `perfpilot run` | 完整闭环：采集 → 诊断 → 方案 → 决策 → 执行 → 验证 → 保留/回滚 → 报告 |

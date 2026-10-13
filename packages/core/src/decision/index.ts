@@ -147,16 +147,38 @@ export class DecisionEngine {
       };
     }
 
+    /**
+     * 路由是 `manual` 的候选**不能**被判 `apply`。
+     *
+     * `manual` 的含义是"没有执行器能完整处理它"：C 类、不可逆、改动跨多类
+     * 执行器、或者压根没有改动项。这种候选若还挂着 `apply`，报告就会写出
+     * 自相矛盾的两行 —— 上面 `apply 1`，下面"产出 0 份 patch"，
+     * 而真正的原因（"没有执行器能处理改动类型 asset/ast"）藏在执行阶段的备注里。
+     * 实测踩到过：LLM 给出的候选把 `asset` 与 `ast` 混在同一个 `changes` 里。
+     *
+     * 降级成 `suggest` 而不是 `confirm`：`confirm` 的语义是"补丁已生成、
+     * 等人工确认"，而 `manual` 连补丁都产不出来。
+     */
+    const verdict =
+      routed.route === 'manual' && graded.verdict === 'apply' ? 'suggest' : graded.verdict;
+
     return {
       id: `dec_${candidate.id}`,
       runId: input.runId,
       candidateId: candidate.id,
-      verdict: graded.verdict,
-      route: graded.verdict === 'reject' ? 'manual' : routed.route,
+      verdict,
+      route: verdict === 'reject' ? 'manual' : routed.route,
       score: utility.score,
       utility: utility.breakdown as UtilityBreakdown,
       riskLevel: riskLevelOf(utility.breakdown.risk, candidate),
-      reasons: [...graded.reasons, allowlist.reason, routed.reason],
+      reasons: [
+        ...graded.reasons,
+        ...(verdict === graded.verdict
+          ? []
+          : [`没有执行器能完整处理这个候选（${routed.reason}），因此不自动执行`]),
+        allowlist.reason,
+        routed.reason,
+      ],
       thresholds,
       decidedAt: input.createdAt,
     };

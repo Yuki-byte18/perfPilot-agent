@@ -73,8 +73,8 @@ describe('extensionOf', () => {
 describe('computeBundleSizes', () => {
   it('忽略非有限体积', () => {
     const samples = computeBundleSizes([
-      { path: 'a.js', size: 100 },
-      { path: 'b.js', size: Number.NaN },
+      { path: 'a.js', size: 100, sourcePath: null },
+      { path: 'b.js', size: Number.NaN, sourcePath: null },
     ]);
     expect(samples.find((s) => s.name === 'JS_SIZE')?.value).toBe(100);
   });

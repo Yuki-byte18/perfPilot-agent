@@ -25,6 +25,7 @@ npm i -D @yuki-byte18/cli      # 或 pnpm add -D @yuki-byte18/cli
 ## 快速开始
 
 ```bash
+npx perfpilot doctor               # 先体检：环境/配置/git/测量地址/Lighthouse/LLM key，每条给修法
 npx perfpilot init                 # 生成 .perfpilot.yml（自动检测包管理器/脚本/仓库，只问测量地址）
 npx perfpilot diagnose             # 只采集 + 诊断：不修改任何代码
 npx perfpilot run --dry-run        # 看会改什么：补丁落盘，不动工作区

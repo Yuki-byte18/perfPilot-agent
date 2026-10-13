@@ -80,7 +80,21 @@ export const TracePayloadSchema = z
   .strict();
 
 export const BundleFileSchema = z
-  .object({ path: z.string().min(1), size: NonNegative })
+  .object({
+    path: z.string().min(1),
+    size: NonNegative,
+    /**
+     * 这个产物对应的**源文件**路径（相对项目根）；认不出来就是 null。
+     *
+     * 为什么必须有它：构建产物里的名字带哈希（`assets/promo-autumn-BjZS4kAo.png`），
+     * 而源文件叫 `promo-autumn.png` —— 拿产物路径去改文件必然落空。实测过一次：
+     * 三条图片候选全部"跳过：文件不存在"，图片优化**从来没真正执行过**。
+     *
+     * 用 `null` 而不是省掉字段：认不出来是常态（运行时拼出来的资源、CDN 上的图），
+     * 而"认不出来"必须能被显式表达，而不是看起来像"没有这个概念"。
+     */
+    sourcePath: z.string().min(1).nullable().default(null),
+  })
   .strict();
 
 export const BundleModuleSchema = z

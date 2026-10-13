@@ -486,6 +486,102 @@ h4 {
 
 /* ── 瓶颈 ────────────────────────────────────────────────────────── */
 
+/* ── 运行模式横幅（读懂报告的第一块） ──────────────────────────── */
+
+.runmode {
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+
+.runmode-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  font-size: 15px;
+}
+
+.runmode-explain {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+.runmode-readonly,
+.runmode-dry-run,
+.runmode-partial {
+  border-left-color: var(--accent);
+}
+
+.runmode-blocked {
+  border-left-color: var(--bad);
+}
+
+.runmode-closed-loop {
+  border-left-color: var(--good);
+}
+
+/* ── 统计分组 ──────────────────────────────────────────────────── */
+
+.stat-group {
+  margin-bottom: 14px;
+}
+
+.stat-group-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.06em;
+  margin-bottom: 6px;
+}
+
+/* ── 下一步 ────────────────────────────────────────────────────── */
+
+.next-steps {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 8px;
+}
+
+.next-steps li {
+  line-height: 1.7;
+}
+
+/* ── 术语表 ────────────────────────────────────────────────────── */
+
+.glossary {
+  display: grid;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.glossary dt {
+  font-weight: 600;
+}
+
+.glossary dd {
+  margin: 2px 0 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+
+/* ── 诊断 agent 的结论列表 ────────────────────────────────────────── */
+
+.agent-findings {
+  display: grid;
+  gap: 6px;
+  margin: 12px 0 0;
+  padding-left: 18px;
+}
+
+.agent-findings li {
+  line-height: 1.6;
+}
+
 .bottlenecks {
   display: grid;
   gap: 12px;

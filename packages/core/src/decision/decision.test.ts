@@ -418,6 +418,30 @@ describe('M4 验收 1 & 6 — 确定性与阈值快照', () => {
     }
   });
 
+  it('没有执行器能处理的候选，不会被判 apply', () => {
+    /**
+     * 真实事故：LLM 把 `asset` 与 `ast` 混在**同一个** `changes` 里。
+     * `routeFor` 正确地判了 `manual`，但分数够高时 `verdict` 仍然是 `apply` ——
+     * 于是报告出现自相矛盾的两行：上面 `apply 1`，下面"产出 0 份 patch"，
+     * 而真正的原因（"没有执行器能处理改动类型 asset/ast"）藏在执行阶段的备注里。
+     */
+    const mixed = candidate({
+      class: 'A',
+      expectedGain: { LCP: 1500 },
+      changes: [
+        { type: 'asset', file: 'public/hero.png', operation: 'compress', params: {} },
+        { type: 'ast', file: 'src/hero.tsx', node: 'add-loading-lazy', description: '加 lazy' },
+      ],
+    });
+
+    const { decisions } = decide([mixed]);
+    const [decision] = decisions;
+
+    expect(decision?.route).toBe('manual');
+    expect(decision?.verdict).toBe('suggest');
+    expect(decision?.reasons.join(' ')).toContain('没有执行器能完整处理');
+  });
+
   it('所有决策都能通过 DecisionSchema', () => {
     const { decisions } = decide([
       candidate(),
