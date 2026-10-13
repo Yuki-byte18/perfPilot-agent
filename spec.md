@@ -842,7 +842,7 @@ perfpilot fix --dry-run                  # 只生成 patch，不落盘
 perfpilot fix --only A                   # 只落地 A 类
 perfpilot fix --candidate cand_8f2a      # 指定单个候选
 perfpilot fix --run run_20260117T142530  # 指定某一轮 run
-perfpilot serve --port 3080              # 只读报告服务（默认只监听 127.0.0.1）
+perfpilot serve --port 3099              # 只读报告服务（默认只监听 127.0.0.1）
 perfpilot history --project my-web-app --limit 20
 perfpilot history --show-failures        # 只看失败记忆
 ```

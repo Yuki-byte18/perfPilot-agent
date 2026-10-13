@@ -55,30 +55,110 @@ npx perfpilot init --ci github
   记得把 `.perfpilot/` 写进 `.gitignore`（`init` 会帮你加）。
 - **验证不通过就回滚。** 报告里会留下这次失败，下一轮不会再试同一个方案。
 
-## 退出码（CI 里用得上）
+## 命令手册
+
+所有命令都支持 `-c/--config <路径>`（默认 `.perfpilot.yml`）。
+
+| 命令 | 用途 | 会不会改代码 |
+| --- | --- | :---: |
+| `doctor` | 体检环境，每条结论给可执行的修法 | 不改 |
+| `init` | 生成 `.perfpilot.yml`，可选生成 CI 文件 | 只写配置 |
+| `diagnose` | 只采集 + 诊断，出报告 | **不改** |
+| `run` | 完整闭环：改 → 验证 → 保留/回滚 | **会改** |
+| `fix` | 对上一轮的候选执行改动 | **会改** |
+| `history` | 历史记录与失败记忆 | 不改 |
+| `serve` | 只读报告服务（API + 网页） | 不改 |
+
+```bash
+npx perfpilot doctor                                   # 建议第一条就跑它
+npx perfpilot init --url http://127.0.0.1:4173 --yes   # 全自动生成配置
+npx perfpilot diagnose --routes /,/dashboard           # 只诊断，可选路由
+npx perfpilot run --preview                            # 自己起预览服务再跑闭环
+npx perfpilot run --dry-run                             # 只出补丁，不动工作区
+npx perfpilot run --ci                                  # 让门禁结论决定退出码
+npx perfpilot fix --only B                              # 落地"等你确认"的那批
+npx perfpilot history --show-failures                   # 哪些改法失败过、为什么
+npx perfpilot serve --port 3099                         # 报告页 http://127.0.0.1:3099
+```
+
+通用参数：`-u/--url`、`-r/--routes`、`-d/--device mobile|desktop`、`-b/--baseline <runId>`、`--json`、`-q/--quiet`、`-v/--verbose`。
+
+**`doctor` 查什么**（每一项都给"下一步敲什么命令"）：Node 版本、配置合法性、是不是 git 仓库、工作区干净不干净、`.gitignore` 有没有忽略运行产物、**测量地址能不能打开**、Lighthouse 装没装、LLM key 在不在环境里、声明的检查脚本存不存在、CI 文件里还有没有占位符。
+
+> 这个工具最容易失败的方式不是"报错"，而是**什么都不做、看起来还正常**：工作区脏 → 补丁一个都不应用；预览服务没起 → 指标整块缺失；key 没设 → agent 静默降级。`doctor` 就是为这三种情况准备的。
+
+## 门禁怎么判 + 退出码
+
+`run --ci` 结束时综合三件事：`gain ≥ min_gain`、单指标回退 ≤ `max_regression`、新增错误 ≤ `max_new_errors`。
+
+**它判的是"回归"，不是绝对值。** 想卡绝对上限（例如"LCP 必须 < 2.5s"），写在 `baseline.metrics.LCP.error` 里。
 
 | 码 | 含义 |
 | --- | --- |
 | `0` | 通过（或非 CI 模式下的正常结束） |
 | `1` | **门禁未通过** —— 只在带 `--ci` 时返回，这样本地跑不会因为"没达标"而看起来像命令失败 |
-| `2` | 配置错误 |
+| `2` | 配置错误（环境没准备好时 `doctor` 也返回这个） |
 | `3` | 采集失败（一条路由都没测到） |
 | `4` | 内部错误 |
 
-## CI 集成
+## CI 集成教程
 
-`init --ci github` 会把下面的逻辑写进 `.github/workflows/perfpilot.yml`：
-安装依赖 → 起 preview 服务器 → `perfpilot run --ci` → 上传报告 artifact →
-（可选）把结论作为 PR 评论发出来。
+### 1. 先有个数
 
-要点：
+- CI 里测的是**构建产物**：workflow 会先 `build` 再起 `preview`（不是 dev server）。
+- **第一次运行没有基线，只记录、不判定**，第二轮才有"变好/变差"的结论。
+- 门禁没过 → 退出码 1 → job 失败；报告**无论成败都会上传**，并贴进 job summary。
 
-- **基线**：默认拿"同项目 + 同路由 + 同设备"的上一次运行做对比，并把 `.perfpilot/` 目录缓存起来；
-  也可以用 `-b <runId>` 显式指定。
-- **门禁判的是回归**，不是绝对值：`gain ≥ min_gain`、单指标回退 ≤ `max_regression`、新增错误 ≤ `max_new_errors`。
-  想卡绝对上限（例如"LCP 必须 < 2.5s"），写在 `baseline.metrics.<指标>.error` 里。
-- 跑在 CI 里时，`target.repo` / `target.branch` 可以从环境变量推断；想让结论进 MR 评论，
-  需要平台 token（`GITHUB_TOKEN` / `GITLAB_TOKEN`）。
+### 2. 让 CI 能拿到 PerfPilot
+
+CI 里拿到工具有两条路，当前用的是第二条：
+
+| 方式 | 怎么拿 | 现状 |
+| --- | --- | --- |
+| 从 npm 装 | `npm i -D @perfpilot/cli` → `npx perfpilot run --ci` | 尚未发布 |
+| **从 git 检出并构建** | `actions/checkout` 一份 PerfPilot → `pnpm install && pnpm build` → `node tools/perfpilot/packages/cli/dist/index.js run --ci` | ✅ |
+
+所以先**把 PerfPilot 推到 GitHub**（自己的账号即可）。公开仓库最省事；私有仓库需要第 4 步那个 token。
+
+### 3. 生成流水线
+
+```bash
+npx perfpilot init --ci github --url http://127.0.0.1:4173
+```
+
+生成 `.github/workflows/perfpilot.yml`：装依赖 → 构建 → **起 preview 并 curl 轮询到就绪** → 检出并构建 PerfPilot → `run --ci` → 无论成败上传报告 + 写 job summary → 按门禁结论决定 job 成败。
+
+`init` 同时把两个目录写进 `.gitignore`：`.perfpilot/` 和 `tools/perfpilot/`。
+**后者别删** —— 那是 CI 检出 PerfPilot 的位置，就在你的仓库里；不忽略它，`git status` 永远是脏的，`run` 会拒绝应用任何改动。
+
+### 4. 改三处（模板故意留空）
+
+1. **PerfPilot 的仓库地址**：把 `repository: CHANGE_ME/perfPilot-agent` 改成 `<你的用户名>/perfpilot-agent`。
+2. **私有仓库要加 token**（公开仓库跳过）：检出步骤加一行 `token: ${{ secrets.PERFPILOT_TOKEN }}`，并在你的项目里 Settings → Secrets and variables → Actions 建一个只读 PAT —— 默认的 `GITHUB_TOKEN` 只能访问当前仓库。
+3. **端口一致**：workflow 里 `npm run preview -- --port 4173` 的端口，必须和 `.perfpilot.yml` 的 `target.url` 一致。
+
+### 5. 推送，看第一次运行
+
+```bash
+git add .perfpilot.yml .github/workflows/perfpilot.yml .gitignore
+git commit -m "ci: 接入 PerfPilot 性能门禁"
+git push -u origin <分支>
+```
+
+开 PR → Actions → `PerfPilot 性能门禁`。一次约 5–10 分钟；结论在 job summary、artifact（`report.md` / `gate.json` / `patches/`）和退出码里。
+
+### 6. CI 里出问题先查这张表
+
+| 症状 | 原因 | 修 |
+| --- | --- | --- |
+| 退出码 3 / "页面打不开" | preview 没起，或端口与 `target.url` 不一致 | 本地验证 `curl http://127.0.0.1:4173` 返回 200；核对端口 |
+| LCP / CLS 整块缺失 | 同上（Chrome 打不开这个地址） | 同上；或改用 `run --ci --preview` 让工具自己起服务 |
+| 报告写"工作区不干净"，零补丁 | `tools/perfpilot/` 没被忽略 | 确认 `.gitignore` 里有它 |
+| 写了"已保留"但仓库里什么都没有 | CI 里缺 git 身份，`git commit` 静默失败 | 保留模板里的 `git config user.name/user.email` 步骤 |
+| 只记录、从不判定 | `.perfpilot/` 缓存没生效，基线每轮都丢 | 确认 `actions/cache` 步骤还在 |
+| 想快速定位环境问题 | —— | 在 CI 里加一步 `node tools/perfpilot/packages/cli/dist/index.js doctor` |
+
+**GitLab**：`init --ci gitlab` 生成 `ci/perfpilot.yml`（**不会动你的 `.gitlab-ci.yml`**），在你的流水线里 `include: - local: ci/perfpilot.yml` 即可。
 
 ## LLM 是可选功能，默认**关**
 
