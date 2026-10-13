@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PerfPilot 报告</title>
+    <!--
+      报告页自己也要满足性能预算（M8 验收 3：LCP < 2.5s，无布局抖动）。
+      三件事直接对着这三个指标做：
+      1. `color-scheme` 让浏览器一开始就选对背景色，避免首帧闪白 —— 那是一次跳动
+      2. 内联关键样式：外链 CSS 会阻塞首屏渲染，而这一页的样式只有几 KB
+      3. 不给 logo / 图标留位：没有图片就没有 CLS，也不会因为图没加载完而重排
+    -->
+    <meta name="color-scheme" content="light dark" />
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f4f6f8;
+        --card: #fff;
+        --text: #16181d;
+        --muted: #667085;
+        --border: #e3e6eb;
+        --good: #14803c;
+        --warn: #a15c00;
+        --bad: #b42318;
+        --accent: #2f5bd0;
+        --good-soft: #eaf7ee;
+        --warn-soft: #fdf3e3;
+        --bad-soft: #fdeceb;
+        --accent-soft: #eef2fd;
+        --code-bg: #f2f4f7;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #14161a;
+          --card: #1c1f25;
+          --text: #e8eaed;
+          --muted: #98a2b3;
+          --border: #2c3038;
+          --good: #4ade80;
+          --warn: #fbbf24;
+          --bad: #f87171;
+          --accent: #7ea2ff;
+          --good-soft: #16281d;
+          --warn-soft: #2a2214;
+          --bad-soft: #2b1a19;
+          --accent-soft: #1b2136;
+          --code-bg: #23262d;
+        }
+      }
+      html,
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.55 system-ui, -apple-system, 'Segoe UI', 'Noto Sans SC', sans-serif;
+      }
+      /* 骨架屏的尺寸与实际内容一致，加载完成时不会把下面的内容顶下去（CLS） */
+      .skeleton {
+        background: var(--border);
+        border-radius: 6px;
+        height: 14px;
+        margin: 10px 0;
+        opacity: 0.6;
+      }
+      .skeleton-title {
+        height: 24px;
+        width: 40%;
+      }
+      .skeleton-row {
+        width: 100%;
+      }
+      .page {
+        max-width: 1180px;
+        margin: 0 auto;
+        padding: 20px 20px 64px;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

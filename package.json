@@ -1,0 +1,40 @@
+{
+  "name": "perfpilot-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "前端性能诊断与自动优化 Agent —— 面向 CI/CD 的前端性能质量门禁",
+  "license": "MIT",
+  "packageManager": "pnpm@11.7.0",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:cov": "vitest run --coverage",
+    "dev:web": "pnpm --filter @yuki-byte18/web dev",
+    "lint": "eslint .",
+    "cycles": "madge --circular --extensions ts packages/shared/src packages/adapters/src packages/core/src packages/cli/src",
+    "check": "pnpm lint && pnpm cycles && pnpm typecheck && pnpm test:cov",
+    "perfpilot": "tsx packages/cli/src/index.ts",
+    "clean": "turbo run clean && rimraf coverage .perfpilot",
+    "release:dry": "turbo run clean && turbo run build --force && pnpm -r publish --access public --no-git-checks --dry-run",
+    "release": "turbo run clean && turbo run build --force && pnpm test && pnpm -r publish --access public --no-git-checks"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.17.0",
+    "@types/node": "^22.10.2",
+    "@vitest/coverage-v8": "^2.1.8",
+    "eslint": "^9.17.0",
+    "madge": "^8.0.0",
+    "rimraf": "^6.0.1",
+    "tsx": "^4.19.2",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2",
+    "typescript-eslint": "^8.18.2",
+    "vitest": "^2.1.8"
+  }
+}

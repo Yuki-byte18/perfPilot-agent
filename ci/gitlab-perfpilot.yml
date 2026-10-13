@@ -1,0 +1,75 @@
+# PerfPilot 性能门禁 —— GitLab CI 模板
+#
+# 用法：在项目根目录的 `.gitlab-ci.yml` 里include 它，或直接把这一段拷过去。
+#
+#   include:
+#     - local: ci/gitlab-perfpilot.yml
+#
+# 与 GitHub Action 版本保持同样的三段结构（跑 → 传报告 → 判门禁），
+# 差异只在各平台自己的语法上：
+#   - GitLab 用 `artifacts.when: always` 表达"无论成败都上传"
+#   - `allow_failure: false` 让非零退出码真的挂掉流水线（默认就挂，
+#     显式写出来是为了让"门禁必须拦住"这件事在配置里可见）
+#   - MR 评论由 perfpilot 自己通过 GitLab API 发（`report.comment_mr: true`），
+#     不依赖 GitLab 的 `artifacts:reports:` 机制
+
+variables:
+  # 报告与记忆都写在这里；GitLab 的缓存路径必须落在项目目录内
+  PERFPILOT_HOME: "$CI_PROJECT_DIR/.perfpilot"
+
+perfpilot:performance:
+  stage: test
+  image: node:22-bookworm
+  timeout: 30m
+
+  # 性能测试会争抢 CPU，同一分支上同时跑两个会让数字失去意义
+  interruptible: true
+
+  cache:
+    key:
+      files:
+        - pnpm-lock.yaml
+      prefix: "perfpilot-$CI_COMMIT_REF_SLUG"
+    paths:
+      # 依赖缓存
+      - .pnpm-store/
+      # 历史与记忆：基线指标 + 失败记忆。
+      # 不缓存的话每次流水线都从零开始，"上次失败过的改法"永远学不到
+      - $PERFPILOT_HOME/memory.db
+
+  before_script:
+    - corepack enable
+    - pnpm config set store-dir .pnpm-store
+    - pnpm install --frozen-lockfile
+    # Chrome 是 Lighthouse 的硬依赖；不装会退化成"Lighthouse 不可用"，
+    # 报告里 LCP/CLS 全缺失，那种绿灯没有意义
+    - npx --yes playwright install --with-deps chromium || echo "Chrome 安装失败，Lighthouse 将不可用"
+    - pnpm build
+
+  script:
+    - |
+      pnpm perfpilot run --ci --url "${PERFPILOT_URL:-http://localhost:4173}"
+      STATUS=$?
+      # 门禁结论进流水线日志的"摘要"区，评审时不用点开 artifact
+      if [ -f .perfpilot/runs/*/gate.json ]; then
+        echo "---- PerfPilot 门禁结论 ----"
+        cat .perfpilot/runs/*/gate.json
+      fi
+      exit $STATUS
+
+  artifacts:
+    # 门禁失败时报告才是最有用的东西，因此必须 always
+    when: always
+    expire_in: 30 days
+    name: "perfpilot-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - .perfpilot/runs/*/report.md
+      - .perfpilot/runs/*/report.json
+      - .perfpilot/runs/*/mr-comment.md
+      - .perfpilot/runs/*/gate.json
+      - .perfpilot/runs/*/patches/
+
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_PIPELINE_SOURCE == "web"

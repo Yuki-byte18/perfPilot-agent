@@ -1,0 +1,50 @@
+{
+  "name": "@yuki-byte18/cli",
+  "version": "0.1.0",
+  "description": "perfpilot 命令行入口",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": {
+    "perfpilot": "./dist/index.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "perfpilot",
+    "web-performance",
+    "core-web-vitals",
+    "lighthouse",
+    "ci",
+    "performance-budget",
+    "cli"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@yuki-byte18/adapters": "workspace:*",
+    "@yuki-byte18/core": "workspace:*",
+    "@yuki-byte18/server": "workspace:*",
+    "@yuki-byte18/shared": "workspace:*",
+    "@yuki-byte18/web": "workspace:*",
+    "commander": "^12.1.0",
+    "yaml": "^2.6.1"
+  }
+}

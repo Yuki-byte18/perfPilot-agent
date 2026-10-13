@@ -1,0 +1,42 @@
+{
+  "name": "@yuki-byte18/server",
+  "version": "0.1.0",
+  "description": "报告 API 服务：把 run 产物暴露给 MR 评论、看板与 Web 报告页",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "perfpilot",
+    "web-performance",
+    "report",
+    "http-api"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@yuki-byte18/core": "workspace:*",
+    "@yuki-byte18/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@yuki-byte18/adapters": "workspace:*"
+  }
+}

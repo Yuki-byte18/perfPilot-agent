@@ -1,0 +1,16 @@
+node_modules/
+dist/
+coverage/
+.turbo/
+.perfpilot/
+# 演示项目（scripts/demo-setup.mjs 生成）：里面有自己的 git 仓库与构建产物
+.demo/
+.verify-tmp/
+*.tsbuildinfo
+# 排障时留下的日志（install.log / off*.log 之类）
+*.log
+# pnpm 的 store 若被配到仓库里，绝不能进版本库
+.pnpm-store/
+.DS_Store
+.env
+.env.local

@@ -1,0 +1,19 @@
+# 换行统一成 LF。
+#
+# 这个仓库在 Windows 上开发、在 Linux 上跑 CI。不做归一化的话，同一份文件在
+# 两端的字节不同 —— 无意义的 diff、以及"本机好好的、CI 里报错"都从这里来。
+* text=auto eol=lf
+
+# 明确的二进制：不让 git 试图对它们做合并或换行转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.tgz binary
+
+# lockfile 由包管理器生成，PR 里折叠起来，不占 diff
+pnpm-lock.yaml linguist-generated=true

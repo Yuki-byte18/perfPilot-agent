@@ -1,0 +1,148 @@
+# PerfPilot Agent 配置示例
+#
+# 复制为 .perfpilot.yml 后按项目修改：
+#   cp .perfpilot.yml.example .perfpilot.yml
+#
+# 所有字段都会被 zod 严格校验：写错键名（例如 minGain 而不是 min_gain）
+# 会在启动时报错退出（退出码 2），而不是被静默忽略后用默认值跑完一整轮 CI。
+
+project:
+  name: my-web-app
+  # 相对于本配置文件所在目录解析，不是相对于 cwd。
+  # 这样从仓库根调用和从子目录调用会得到同一个 root。
+  root: .
+
+target:
+  url: https://staging.example.com
+  routes:
+    - /
+    - /dashboard
+    - /settings/profile
+  # 代码托管平台信息。**不在 CI 环境里时靠它**（CI 里由平台的环境变量提供）：
+  #   - auto_pr 的 base 分支
+  #   - MR 评论的目标仓库
+  # 留空表示未接入 SCM：评论仍会落盘，但不会发布出去。
+  repo: https://github.com/org/my-web-app
+  branch: main
+
+baseline:
+  # last-run（默认）| git ref | 某个 runId
+  ref: last-run
+  # 指标阈值覆盖。warning = good 边界，error = poor 边界，口径同 Web Vitals。
+  # 不写的指标用内置默认值（见 packages/shared/src/utils/metric.ts 的 METRIC_SPECS）。
+  metrics:
+    LCP:      { warning: 2500,    error: 4000 }      # ms
+    INP:      { warning: 200,     error: 500 }       # ms
+    CLS:      { warning: 0.1,     error: 0.25 }
+    JS_SIZE:  { warning: 300000,  error: 500000 }    # byte
+    IMAGE_SIZE: { warning: 500000, error: 1500000 }  # byte
+
+optimization:
+  # A 类：全自动。M5 起会被决策层判为 apply 并直接执行 + 验证。
+  auto_fix:
+    - OVERSIZED_IMAGE
+    - UNCOMPRESSED_IMAGE
+    - MISSING_DIMENSIONS
+    - MISSING_LAZY_LOADING
+    - UNUSED_DEPENDENCY
+    - DUPLICATE_DEPENDENCY
+    - LEGACY_LIBRARY
+    - NO_COMPRESSION
+  # B 类：生成 patch，人工确认后合并。
+  manual_confirm:
+    - NO_CODE_SPLITTING
+    - LARGE_JS_BUNDLE
+    - MISSING_PRELOAD
+  # C 类：只出建议，不产出 patch。
+  suggest_only:
+    - LONG_MAIN_THREAD_TASK
+    - EXCESSIVE_REQUESTS
+
+decision:
+  # false = 不自动执行任何改动：所有候选降级为「仅建议」，决策层只打分不改代码。
+  jev: true
+  thresholds:
+    # ---- 验证门禁（M5）：改动进不进得去 ----
+    min_gain: 5          # 归一化分数，收益低于此值不保留
+    max_regression: 2    # 任一指标回归超过此值即回滚
+    max_new_errors: 0    # 新增错误数上限
+
+    # ---- 裁决刻度（M4）：候选值不值得做 ----
+    # 这两个数**与真实候选的量纲对齐**：实测 utility 落在个位数到几十，
+    # 不是 0-100。曾经默认写成 60/35，结果 12 个候选全被判 reject ——
+    # 「按比例缩放」的直觉在这里是错的，别随手调大。
+    # 只有在你确认「该做的没被做」时才调低，且要看报告里的 utility 分布。
+    apply_score: 30      # 效用分 ≥ 此值 → apply（全自动）
+    confirm_score: 10    # 效用分 ≥ 此值 → confirm（出 patch 待确认）
+
+report:
+  # markdown / json / html 三种都可用。
+  format: [markdown, json]
+  comment_mr: false    # 在 MR / PR 上发布结构化评论（需 CI 环境 + token）
+  auto_pr: false       # 自动创建 PR（含 patch 与验证结论）
+
+# 说明：**触发方式不在配置里**，它由 CI 平台的 YAML 决定
+# （`.github/workflows/perfpilot.yml` / `ci/gitlab-perfpilot.yml`）。
+# 这里曾经有一个 `ci:` 段声明了 trigger / baseline 两个字段，
+# 却没有任何代码读它们 —— 留着不生效的开关比没有更糟，已整段删除。
+# 基线策略在下面的 `baseline.ref` 里配。
+
+collect:
+  timeoutMs: 120000      # 单轮采集超时
+  runs: 1                # 采集轮次；>1 时逐指标取中位数以降噪（代价是时间线性增加）
+
+# 验证阶段的检查项。改动的「应用 → 验证 → 保留/回滚」全靠它把关。
+checks:
+  # 用哪个包管理器跑 package.json 里的脚本。
+  #   auto（默认）= 按 lockfile 判断（pnpm-lock.yaml / yarn.lock / bun.lockb / package-lock.json）
+  # 判断不出来时回落到 pnpm。**用错包管理器会表现为「检查未通过」并把优化回滚掉**，
+  # 而报出来的理由是"单测没过"，与真正的原因毫无关系 —— 所以别让它猜。
+  package_manager: auto
+  # 要跑哪些检查。build 必须留着：重采集读的是构建产物，
+  # 不先重建就等于拿改动前的产物去评估改动后的代码，收益恒为 0、候选必然回滚。
+  kinds: [build, unit-test, type-check, lint, e2e]
+  # 脚本名映射。写 null 表示「这个项目不做这项检查」（记为 skipped，不是 failed）。
+  # 没有对应 script 时同样是 skipped，因此不必把不需要的项都列出来。
+  scripts:
+    build: build
+    unit-test: test
+    type-check: typecheck
+    lint: lint
+    e2e: e2e
+
+# ── LLM（诊断 agent + 方案生成）─────────────────────────────────────
+#
+# 分两处参与，**都不参与决策**（"改不改"永远是纯函数，见硬约束 7）：
+#   1. diagnose:  诊断 agent —— 读原始证据（Lighthouse / HAR / trace / bundle 的摘要）
+#                 做归因复核与补充。它产出的结论必须带证据、置信度上限 75%，
+#                 与规则重复的会被丢掉。报告里标为「🤖 诊断 agent」
+#   2. plan_mode: 方案生成 —— always 表示对每个瓶颈都出候选，与规则候选一起排序
+#
+# `provider: none`（默认）= **一次调用都不会发生，也不花钱**。
+#
+# 接 DeepSeek（OpenAI 兼容）的完整写法：
+#   llm:
+#     provider: openai                      # openai 这一个值覆盖所有 OpenAI 兼容服务
+#     base_url: https://api.deepseek.com    # 关键：不填就固定打 api.openai.com
+#     model: deepseek-chat
+#     api_key_env: DEEPSEEK_API_KEY         # 从哪个环境变量读 key
+#     maxCostUsd: 2                         # 单轮累计上限（诊断 + 方案共用）
+#
+# 装可选依赖（SDK 是动态加载的，不装也能跑，只是 LLM 能力降级为空）。
+# ⚠️ 在 PerfPilot 仓库里执行，而且必须指定 `--filter @yuki-byte18/core`：
+#    pnpm --filter @yuki-byte18/core add ai @ai-sdk/openai
+# pnpm 的 node_modules 是严格的 —— 装在仓库根目录时，core 里的
+# `import('ai')` 解析不到它（只有声明过的依赖才会被链接进去）。
+# key 的默认约定（不写 api_key_env 时）：OPENAI_API_KEY / ANTHROPIC_API_KEY
+llm:
+  provider: none
+  model: gpt-4o-mini
+  base_url: null         # OpenAI 兼容服务的入口；null = 用 SDK 默认
+  api_key_env: null      # 读 key 的环境变量名；null = 用 SDK 默认约定
+  maxCostUsd: 2          # 单轮累计成本上限（美元），超了就不再调用
+  plan_mode: always      # always | fallback（fallback = 只在规则没给出候选时才问）
+  diagnose: true         # 是否启用诊断 agent
+
+memory:
+  driver: sqlite       # sqlite（本地/CI）| postgres（服务端，需注入连接）
+  url: .perfpilot/memory.db

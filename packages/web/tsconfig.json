@@ -1,0 +1,40 @@
+{
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+
+    /**
+     * 与其它包不同：这里是浏览器产物，走打包器解析而不是 Node ESM。
+     * NodeNext 会强制 `.js` 后缀的 ESM 导入规则，而 Vite 打包时不需要 ——
+     * 沿用会写出一堆解析不到的后缀。
+     */
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+
+    /**
+     * `types: []`：浏览器代码里不该出现 Node 的类型。
+     * 一个有 `process.env` 的报告页会在 CI 构建时通过、在浏览器里炸掉。
+     */
+    "types": [],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "useUnknownInCatchVariables": true,
+
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    // 由 vite build 产出，tsc 只做类型检查
+    "noEmit": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "vite.config.ts"]
+}

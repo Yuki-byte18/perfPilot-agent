@@ -1,0 +1,45 @@
+{
+  "name": "@yuki-byte18/core",
+  "version": "0.1.0",
+  "description": "核心引擎：线性流水线、采集归并、报告渲染",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "perfpilot",
+    "web-performance",
+    "performance-budget",
+    "ci",
+    "llm"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "clean": "rimraf dist"
+  },
+  "dependencies": {
+    "@yuki-byte18/shared": "workspace:*",
+    "pino": "^9.5.0"
+  },
+  "devDependencies": {
+    "@ai-sdk/openai": "^4.0.91",
+    "@yuki-byte18/adapters": "workspace:*",
+    "ai": "^7.0.137"
+  }
+}
